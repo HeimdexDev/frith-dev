@@ -25,7 +25,10 @@ from typing import Protocol
 import cv2
 import numpy as np
 
-MATCH_IOU = 0.3
+# Overlap at which two boxes in nearby frames are treated as one face. A neighbouring face
+# that overlaps less than this must not cancel a hold.
+SAME_FACE_IOU = 0.5
+MIN_BLUR_PX = 2
 MIN_FRAME_ALLOWANCE = 2
 
 
@@ -222,29 +225,36 @@ def encoder_cmd(dst: str | Path, meta: VideoMeta, codec: Codec) -> list[str]:
     ]
 
 
+def _clamp_span(low: int, high: int, limit: int) -> tuple[int, int]:
+    """Clip a span to [0, limit], growing it to MIN_BLUR_PX so no box is too small to blur."""
+    low, high = max(low, 0), min(high, limit)
+    if high - low >= MIN_BLUR_PX:
+        return low, high
+    low = max(min(low, limit - MIN_BLUR_PX), 0)
+    return low, min(low + MIN_BLUR_PX, limit)
+
+
 def expand_box(box: np.ndarray, padding: float, frame_w: int, frame_h: int) -> tuple[int, int, int, int]:
     """Scale a box around its center by padding and clip it to the frame."""
     x1, y1, x2, y2 = (float(v) for v in box[:4])
     cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
     half_w, half_h = (x2 - x1) * padding / 2, (y2 - y1) * padding / 2
-    return (
-        max(math.floor(cx - half_w), 0),
-        max(math.floor(cy - half_h), 0),
-        min(math.ceil(cx + half_w), frame_w),
-        min(math.ceil(cy + half_h), frame_h),
-    )
+    left, right = _clamp_span(math.floor(cx - half_w), math.ceil(cx + half_w), frame_w)
+    top, bottom = _clamp_span(math.floor(cy - half_h), math.ceil(cy + half_h), frame_h)
+    return left, top, right, bottom
 
 
-def blur_boxes(frame: np.ndarray, boxes: np.ndarray, padding: float) -> None:
-    """Gaussian blur inside each padded box, in place."""
+def blur_boxes(frame: np.ndarray, boxes: np.ndarray, padding: float) -> list[list[int]]:
+    """Gaussian blur inside each padded box, in place. Returns the regions actually blurred."""
     frame_h, frame_w = frame.shape[:2]
+    regions = []
     for box in boxes:
         x1, y1, x2, y2 = expand_box(box, padding, frame_w, frame_h)
-        if x2 - x1 < 2 or y2 - y1 < 2:
-            continue
         kernel = max(15, (max(x2 - x1, y2 - y1) // 2) | 1)
         roi = frame[y1:y2, x1:x2]
         frame[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (kernel, kernel), 0)
+        regions.append([x1, y1, x2, y2])
+    return regions
 
 
 def filter_small(boxes: np.ndarray, min_face_px: int) -> np.ndarray:
@@ -266,27 +276,62 @@ def box_iou(box: np.ndarray, others: np.ndarray) -> np.ndarray:
     return intersection / np.maximum(area + other_areas - intersection, 1e-6)
 
 
+def match_same_faces(first: np.ndarray, second: np.ndarray, min_iou: float) -> list[tuple[int, int]]:
+    """Pair boxes one-to-one, best overlap first, so one box can never claim two faces."""
+    if len(first) == 0 or len(second) == 0:
+        return []
+    overlaps = np.array([box_iou(box, second) for box in first])
+    order = np.argsort(-overlaps, axis=None, kind="stable")
+    pairs: list[tuple[int, int]] = []
+    used_first: set[int] = set()
+    used_second: set[int] = set()
+    for i, j in zip(*(axis.tolist() for axis in np.unravel_index(order, overlaps.shape))):
+        if overlaps[i, j] < min_iou:
+            break
+        if i not in used_first and j not in used_second:
+            pairs.append((i, j))
+            used_first.add(i)
+            used_second.add(j)
+    return pairs
+
+
 class BoxHolder:
     """Keep each box for up to hold_frames after its detection disappears.
 
     Works per box, so one face dropping out is covered while others are still detected.
+    A hold ends early only when a detection pairs with it as the same face.
     A moved face may briefly be blurred at both positions, which errs toward over-blurring.
     """
 
-    def __init__(self, hold_frames: int, match_iou: float = MATCH_IOU) -> None:
+    def __init__(self, hold_frames: int, match_iou: float = SAME_FACE_IOU) -> None:
         self.hold_frames, self.match_iou = hold_frames, match_iou
         self._tracks: list[tuple[np.ndarray, int]] = []
 
     def update(self, detected: np.ndarray) -> np.ndarray:
         """Return the boxes held over for this frame, excluding the detected ones."""
-        survivors: list[tuple[np.ndarray, int]] = []
-        for box, age in self._tracks:
-            if len(detected) and (box_iou(box, detected) >= self.match_iou).any():
-                continue
-            if age + 1 <= self.hold_frames:
-                survivors.append((box, age + 1))
+        tracked = np.array([box for box, _ in self._tracks], np.float32).reshape(-1, 5)
+        redetected = {i for i, _ in match_same_faces(tracked, detected, self.match_iou)}
+        survivors = [
+            (box, age + 1)
+            for i, (box, age) in enumerate(self._tracks)
+            if i not in redetected and age + 1 <= self.hold_frames
+        ]
         self._tracks = [(box, 0) for box in detected] + survivors
         return np.array([box for box, _ in survivors], np.float32).reshape(-1, 5)
+
+
+def _merge_filled(ahead: np.ndarray, behind: np.ndarray) -> np.ndarray:
+    """Combine forward and backward boxes. Same-face pairs become their enclosing box.
+
+    Every input box stays inside some output box, so the blurred area can only grow.
+    """
+    pairs = match_same_faces(ahead, behind, SAME_FACE_IOU)
+    merged = ahead.copy()
+    for i, j in pairs:
+        a, b = ahead[i], behind[j]
+        merged[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]), max(a[4], b[4])]
+    paired = {j for _, j in pairs}
+    return np.concatenate([merged, behind[[j not in paired for j in range(len(behind))]]])
 
 
 def fill_gaps(detected: list[np.ndarray], hold_frames: int) -> list[np.ndarray]:
@@ -295,12 +340,7 @@ def fill_gaps(detected: list[np.ndarray], hold_frames: int) -> list[np.ndarray]:
     forward = [forward_holder.update(boxes) for boxes in detected]
     backward = [backward_holder.update(boxes) for boxes in reversed(detected)]
     backward.reverse()
-    filled = []
-    for ahead, behind in zip(forward, backward):
-        if len(ahead) and len(behind):
-            behind = behind[[not (box_iou(box, ahead) >= MATCH_IOU).any() for box in behind]]
-        filled.append(np.concatenate([ahead, behind]))
-    return filled
+    return [_merge_filled(ahead, behind) for ahead, behind in zip(forward, backward)]
 
 
 def detection_stats(detected: list[np.ndarray], filled: list[np.ndarray]) -> DetectionStats:
@@ -428,6 +468,18 @@ def _rounded(boxes: np.ndarray) -> list[list[float]]:
     return [[round(float(v), 2) for v in box] for box in boxes]
 
 
+def _box_log_meta(meta: VideoMeta, params: BlurParams) -> dict[str, float | int]:
+    """Everything a checker needs to recompute blur_regions and the fill rule from the log."""
+    return {
+        "padding": params.padding,
+        "hold_frames": params.hold_frames,
+        "width": meta.width,
+        "height": meta.height,
+        "min_blur_px": MIN_BLUR_PX,
+        "same_face_iou": SAME_FACE_IOU,
+    }
+
+
 def _blur_and_encode(
     src: str | Path,
     dst: Path,
@@ -446,18 +498,20 @@ def _blur_and_encode(
     with _Watchdog(limits.frame_timeout_seconds, [decoder, encoder]) as watchdog:
         try:
             with open(boxes_path, "w") as log:
+                log.write(json.dumps({"meta": _box_log_meta(meta, params)}) + "\n")
                 for frame in _frames(decoder, meta):
                     # A frame without detection results must never be encoded.
                     if frames >= len(detected):
                         raise mismatch
-                    blur_boxes(frame, np.concatenate([detected[frames], filled[frames]]), params.padding)
+                    regions = blur_boxes(frame, np.concatenate([detected[frames], filled[frames]]), params.padding)
                     encoder.stdin.write(frame.data)
-                    log.write(
-                        json.dumps(
-                            {"frame": frames, "boxes": _rounded(detected[frames]), "filled": _rounded(filled[frames])}
-                        )
-                        + "\n"
-                    )
+                    entry = {
+                        "frame": frames,
+                        "boxes": _rounded(detected[frames]),
+                        "filled": _rounded(filled[frames]),
+                        "blur_regions": regions,
+                    }
+                    log.write(json.dumps(entry) + "\n")
                     frames += 1
                     watchdog.beat()
             encoder.stdin.close()
