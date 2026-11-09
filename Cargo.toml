@@ -1,0 +1,16 @@
+[package]
+name = "frith-release"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Proprietary"
+publish = false
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.154"
+tempfile = "=3.27.0"
+
+[[bin]]
+name = "frith-demo"
+path = "src/bin/demo.rs"

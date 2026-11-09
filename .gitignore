@@ -1,3 +1,11 @@
+.tools/
+target/
+formal/.lake/
+output/
+tmp/
+.DS_Store
+
+# infra/ (terraform, env)
 .terraform/
 *.tfstate
 *.tfstate.*
