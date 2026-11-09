@@ -1,6 +1,20 @@
 # Frith: request-led dataset exchange
 
-Review date: 2026-11-09 (Asia/Seoul). Proposal, not a claim that the full workflow is implemented.
+Review date: 2026-11-09 (Asia/Seoul). The original proposal below is retained as design history.
+
+## Follow-up implementation: two core features
+
+The user approved separating Data requests from Safe sharing. The current frontend now defaults to a request list with creation/editing, requirements, seller-proposed whole datasets, buyer scope agreement, and a guarded handoff to a new sharing package. Safe sharing preserves the prior processing, review, preview/download and revocation workflows, including independent package creation.
+
+Request-linked packages freeze the agreed scope as v1, reset processing/review and contain no grants on creation. Only the agreed buyer may subsequently receive a grant. Stale requests, changed sources, wrong roles and duplicate handoffs are rejected. Requirement edits and replacement offers invalidate agreement. The three-stage banner from the first increment was replaced by working request screens.
+
+See `frontend/README.md` for the walkthrough and `frontend/BACKEND_CONTRACTS.md` for the implemented mock route contract. Matching remains simulated; no full six-screen curation implementation or production delivery integration is claimed.
+
+Validation for this follow-up: 13 Rust frontend integration tests (5 HTTP, 4 request, 4 sharing), 3 JavaScript player tests, frontend formatting, Clippy with warnings denied, and diff whitespace checks passed. Desktop browser walkthrough verified creation → seller proposal → buyer agreement → seller handoff, ending at a processing package with no sharing controls or grants. Mobile rendering, real identity, persistent storage, search, inference and export remain unverified. Root release/Lean source is unchanged; its previously passing suite was not rerun for this frontend-only update.
+
+All work remains on `codex/frith-exchange-redesign` in the isolated review worktree. The remote was still `ae647e9` at the beginning of this follow-up. Original main and existing preview processes were preserved. A separate updated preview runs on port 3109.
+
+---
 
 ## Product decision
 

@@ -63,3 +63,23 @@ A future backend adapter must orchestrate that core before transfer and publicat
 ## Owner comparison review
 
 The mock now serves an owner-only original-review route and byte-range-capable preview media. See [COMPARISON_HANDOFF.md](COMPARISON_HANDOFF.md) for the proposed pair manifest and separate responsibilities for infrastructure and GPU/blur engineering. This adds no authority to the demo organization switcher. Receivers remain limited to approved derivatives.
+
+## Request workflow: implemented mock transport
+
+`FrithApi` now extends `RequestApi`. Implementors must supply `requests`, `request`, `save_request` and `act_on_request`; the remote async adapter remains outstanding.
+
+| Local form/page route | Mock behavior |
+| --- | --- |
+| GET `/` or `/requests?org=…&q=…` | Participant-scoped request list; default landing page |
+| GET `/requests/new?org=…`, POST `/requests?org=…` | Create as current buyer; invited seller gains request visibility |
+| GET `/requests/{id}?org=…` | Requirements, seller's proposal summary and agreement/handoff status |
+| GET/POST `/requests/{id}/edit?org=…` | Buyer only, expected revision; reset proposal/agreement; reject after preparation |
+| POST `/requests/{id}/change?org=…` | Expected revision plus `offer`, `agree`, or `prepare` |
+
+Requirements include title, task, acceptance criteria, requested volume, perspective, action-data requirement, purpose, destination, deadline and seller. Optional free-text deadline/volume are descriptive, not parsed scheduling or fulfillment rules. Destination is buyer intent, never verified residency evidence.
+
+Only the seller can propose an owned standalone source dataset, binding its ID/revision, name, count and terms. The buyer sees this intentionally disclosed summary, not raw filename lists, media URLs or other seller inventory. Agreement belongs to the buyer. A replacement proposal or requirement edit invalidates agreement. Whole-dataset proposals can fall short of the requested volume; the buyer explicitly agrees to the displayed proposal, not an automated fulfillment claim.
+
+Only the seller can prepare an agreed request. The mock serializes mutations under its existing mutex, validates expected request/source revisions, creates one new package, then links it to the request. The package stores `request_origin` (request/revision, buyer, requirements, offer and version 1); processing/review starts fresh and grants are empty. Scope freezes after handoff. Sharing a linked package is restricted to its agreed buyer; ordinary review, media and revocation checks still apply. Request participants can view request progress without being entitled to its package. Package links for buyers appear only after existing access checks succeed.
+
+Production must replace the mutex/in-memory records with an atomic transaction and durable uniqueness/idempotency, authenticate each role, bind source/output artifact hashes and versions, validate rights and commercial evidence, and orchestrate the export core. The v1 snapshot is a demo scope record, not an immutable cloud artifact or legal authorization. Real semantic matching, selected time ranges, billing and subsequent package versions are not implemented.
