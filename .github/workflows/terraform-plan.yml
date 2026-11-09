@@ -28,6 +28,8 @@ concurrency:
 
 jobs:
   plan:
+    # Skipped (not failed) until the CI OIDC role exists and the repo variable is set.
+    if: vars.AWS_ROLE_ARN != ''
     runs-on: ubuntu-24.04
     defaults:
       run:

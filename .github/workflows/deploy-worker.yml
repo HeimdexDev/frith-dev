@@ -29,6 +29,8 @@ env:
 
 jobs:
   push:
+    # Skipped (not failed) until the CI OIDC role exists and the repo variable is set.
+    if: vars.AWS_ROLE_ARN != ''
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +52,7 @@ jobs:
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
       - name: trivy scan (fail on CRITICAL)
-        uses: aquasecurity/trivy-action@<PIN_VERSION> # TODO: pin a verified release tag or commit SHA
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0, signed commit
         with:
           image-ref: ${{ env.IMAGE }}:${{ github.sha }}
           severity: CRITICAL
