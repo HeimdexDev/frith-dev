@@ -1,4 +1,5 @@
 pub mod api;
+mod request_ui;
 mod ui;
 use api::*;
 use axum::{
@@ -17,8 +18,62 @@ pub struct PageQuery {
     pub tab: Option<String>,
     pub q: Option<String>,
     pub clip: Option<usize>,
+    pub view: Option<WorkspaceView>,
+    pub stage: Option<PackageStage>,
+}
+/// Presentation context only; ownership and grants remain the authorization boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceView {
+    Buying,
+    Supplying,
+}
+impl WorkspaceView {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Buying => "buying",
+            Self::Supplying => "supplying",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Buying => "Buying",
+            Self::Supplying => "Supplying",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageStage {
+    #[default]
+    All,
+    Processing,
+    Review,
+    Ready,
+    Failed,
+    Shared,
+}
+impl PackageStage {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Processing => "processing",
+            Self::Review => "review",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+            Self::Shared => "shared",
+        }
+    }
 }
 impl PageQuery {
+    pub fn workspace_view(&self, org: &str) -> WorkspaceView {
+        self.view.unwrap_or_else(|| match self.tab.as_deref() {
+            Some("received") => WorkspaceView::Buying,
+            Some("shared") => WorkspaceView::Supplying,
+            _ if org == "heimdex" => WorkspaceView::Supplying,
+            _ => WorkspaceView::Buying,
+        })
+    }
     fn org(&self) -> ApiResult<&str> {
         let org = self.org.as_deref().unwrap_or("heimdex");
         if ORGS.iter().any(|o| o.0 == org) {
@@ -43,6 +98,14 @@ pub fn app() -> Router {
 pub fn app_with(api: Box<dyn FrithApi>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/requests", get(request_list).post(create_request))
+        .route("/requests/new", get(new_request))
+        .route("/requests/{id}", get(request_detail))
+        .route(
+            "/requests/{id}/edit",
+            get(edit_request).post(update_request),
+        )
+        .route("/requests/{id}/change", post(change_request))
         .route("/datasets/new", get(new_dataset))
         .route("/datasets", post(create))
         .route("/datasets/{id}", get(detail))
@@ -86,7 +149,11 @@ async fn index(
 ) -> Result<Html<String>, ApiError> {
     let org = q.org()?;
     let api = api.lock().unwrap();
-    Ok(Html(ui::index(org, &q, api.list(org), api.activity(org))))
+    if q.tab.as_deref().is_none_or(|tab| tab == "requests") {
+        Ok(Html(request_ui::list(org, &q, api.requests(org))))
+    } else {
+        Ok(Html(ui::index(org, &q, api.list(org), api.activity(org))))
+    }
 }
 async fn new_dataset(Query(q): Query<PageQuery>) -> Result<Html<String>, ApiError> {
     Ok(Html(ui::new_dataset(q.org()?)))
@@ -221,4 +288,130 @@ fn video_response(bytes: &'static [u8], headers: &HeaderMap) -> Response {
         response.headers_mut().insert(key, value.parse().unwrap());
     }
     response
+}
+
+async fn request_list(
+    State(api): State<Service>,
+    Query(q): Query<PageQuery>,
+) -> Result<Html<String>, ApiError> {
+    let org = q.org()?;
+    Ok(Html(request_ui::list(
+        org,
+        &q,
+        api.lock().unwrap().requests(org),
+    )))
+}
+async fn new_request(Query(q): Query<PageQuery>) -> Result<Html<String>, ApiError> {
+    Ok(Html(request_ui::form(
+        q.org()?,
+        None,
+        Requirements {
+            action_data: "any".into(),
+            ..Default::default()
+        },
+        None,
+    )))
+}
+async fn request_detail(
+    State(api): State<Service>,
+    Path(id): Path<u64>,
+    Query(q): Query<PageQuery>,
+) -> Result<Html<String>, ApiError> {
+    let org = q.org()?;
+    let api = api.lock().unwrap();
+    let r = api.request(org, id)?;
+    let sources = if org == r.requirements.seller {
+        api.list(org)
+            .into_iter()
+            .filter(|d| d.owner == org && d.request_origin.is_none())
+            .collect()
+    } else {
+        vec![]
+    };
+    let package_visible = r.package_id.is_some_and(|id| api.get(org, id).is_ok());
+    Ok(Html(request_ui::detail(org, r, sources, package_visible)))
+}
+async fn edit_request(
+    State(api): State<Service>,
+    Path(id): Path<u64>,
+    Query(q): Query<PageQuery>,
+) -> Result<Html<String>, ApiError> {
+    let org = q.org()?;
+    let r = api.lock().unwrap().request(org, id)?;
+    if r.buyer != org {
+        return Err(ApiError(403, "Only the buyer can edit requirements."));
+    }
+    if r.package_id.is_some() {
+        return Err(ApiError(
+            409,
+            "Prepared package scope cannot be edited. Create a new request.",
+        ));
+    }
+    Ok(Html(request_ui::form(
+        org,
+        Some((id, r.revision)),
+        r.requirements,
+        None,
+    )))
+}
+async fn create_request(
+    State(api): State<Service>,
+    Query(q): Query<PageQuery>,
+    Form(input): Form<Requirements>,
+) -> Result<Response, ApiError> {
+    let org = q.org()?;
+    let result = api.lock().unwrap().save_request(org, None, input.clone());
+    Ok(match result {
+        Ok(id) => Redirect::to(&format!("/requests/{id}?org={org}")).into_response(),
+        Err(e) => (
+            StatusCode::from_u16(e.0).unwrap(),
+            Html(request_ui::form(org, None, input, Some(e.1))),
+        )
+            .into_response(),
+    })
+}
+#[derive(Deserialize)]
+struct EditRequest {
+    revision: u64,
+    #[serde(flatten)]
+    requirements: Requirements,
+}
+async fn update_request(
+    State(api): State<Service>,
+    Path(id): Path<u64>,
+    Query(q): Query<PageQuery>,
+    Form(input): Form<EditRequest>,
+) -> Result<Response, ApiError> {
+    let org = q.org()?;
+    let result = api.lock().unwrap().save_request(
+        org,
+        Some((id, input.revision)),
+        input.requirements.clone(),
+    );
+    Ok(match result {
+        Ok(id) => Redirect::to(&format!("/requests/{id}?org={org}")).into_response(),
+        Err(e) => (
+            StatusCode::from_u16(e.0).unwrap(),
+            Html(request_ui::form(
+                org,
+                Some((id, input.revision)),
+                input.requirements,
+                Some(e.1),
+            )),
+        )
+            .into_response(),
+    })
+}
+async fn change_request(
+    State(api): State<Service>,
+    Path(id): Path<u64>,
+    Query(q): Query<PageQuery>,
+    Form(input): Form<RequestAction>,
+) -> Result<Redirect, ApiError> {
+    let org = q.org()?;
+    let package = api.lock().unwrap().act_on_request(org, id, input)?;
+    Ok(Redirect::to(&match package {
+        Some(package) => format!("/datasets/{package}?org={org}"),
+        None => format!("/requests/{id}?org={org}"),
+    }))
 }
