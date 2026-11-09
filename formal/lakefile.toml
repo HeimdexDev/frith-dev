@@ -1,0 +1,10 @@
+name = "frith"
+version = "0.1.0"
+defaultTargets = ["frith-checker", "Frith.Proofs"]
+
+[[lean_lib]]
+name = "Frith"
+
+[[lean_exe]]
+name = "frith-checker"
+root = "Main"
