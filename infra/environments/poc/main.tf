@@ -45,11 +45,12 @@ module "queue" {
 module "storage" {
   source = "../../modules/storage"
 
-  name                 = local.name
-  api_role_arn         = module.api.task_role_arn
-  worker_role_arn      = module.gpu_external.worker_role_arn
-  cors_allowed_origins = local.cors_origins
-  force_destroy        = var.s3_force_destroy
+  name                       = local.name
+  api_role_arn               = module.api.task_role_arn
+  worker_role_arn            = module.gpu_external.worker_role_arn
+  cors_allowed_origins       = local.cors_origins
+  force_destroy              = var.s3_force_destroy
+  break_glass_principal_arns = var.break_glass_principal_arns
 }
 
 module "database" {

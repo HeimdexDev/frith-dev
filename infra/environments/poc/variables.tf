@@ -111,6 +111,12 @@ variable "s3_force_destroy" {
   default     = false
 }
 
+variable "break_glass_principal_arns" {
+  description = "IAM role ARNs (with path) given object data + KMS access to raw/safe for an incident or a supervised E2E test. Keep empty otherwise."
+  type        = list(string)
+  default     = []
+}
+
 variable "sqs_visibility_timeout_seconds" {
   type    = number
   default = 3600
