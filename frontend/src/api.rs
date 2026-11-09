@@ -1,5 +1,7 @@
 //! Replace this adapter with authenticated backend calls; never trust browser organization IDs.
 use serde::{Deserialize, Serialize};
+mod requests;
+pub use requests::*;
 
 pub const ORGS: [(&str, &str, &str); 3] = [
     ("heimdex", "Heimdex", "South Korea"),
@@ -63,6 +65,7 @@ pub struct Dataset {
     pub status: Status,
     pub clips: Vec<Clip>,
     pub grants: Vec<Grant>,
+    pub request_origin: Option<RequestOrigin>,
 }
 impl Dataset {
     pub fn visible(&self, org: &str) -> bool {
@@ -92,7 +95,7 @@ pub struct Change {
     pub permission: Option<String>,
 }
 /// UI-facing service boundary. The mock is synchronous; a network adapter should make these async.
-pub trait FrithApi: Send + Sync {
+pub trait FrithApi: RequestApi + Send + Sync {
     fn list(&self, org: &str) -> Vec<Dataset>;
     fn get(&self, org: &str, id: u64) -> ApiResult<Dataset>;
     fn create(&mut self, org: &str, input: CreateDataset) -> ApiResult<u64>;
@@ -115,6 +118,8 @@ pub struct MockApi {
     datasets: Vec<Dataset>,
     events: Vec<Event>,
     next_id: u64,
+    requests: Vec<DataRequest>,
+    next_request_id: u64,
 }
 impl Default for MockApi {
     fn default() -> Self {
@@ -131,6 +136,7 @@ impl Default for MockApi {
                 })
                 .collect(),
             grants,
+            request_origin: None,
         };
         Self {
             datasets: vec![
@@ -172,6 +178,8 @@ impl Default for MockApi {
                 text: "Seoul · warehouse floor shared with Atlas Robotics · Preview only".into(),
             }],
             next_id: 6,
+            requests: requests::sample_requests(),
+            next_request_id: 2,
         }
     }
 }
@@ -231,6 +239,7 @@ impl FrithApi for MockApi {
                 })
                 .collect(),
             grants: vec![],
+            request_origin: None,
         });
         self.events.push(Event {
             org: org.into(),
@@ -290,6 +299,12 @@ impl FrithApi for MockApi {
                     .ok_or(ApiError(422, "Choose an organization."))?;
                 if recipient == org || !ORGS.iter().any(|o| o.0 == recipient) {
                     return Err(ApiError(422, "Choose another invited organization."));
+                }
+                if d.request_origin
+                    .as_ref()
+                    .is_some_and(|r| r.buyer != recipient)
+                {
+                    return Err(ApiError(422, "This package is scoped to the agreed buyer."));
                 }
                 let download = match input.permission.as_deref() {
                     Some("preview") => false,
