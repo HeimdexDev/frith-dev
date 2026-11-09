@@ -45,6 +45,8 @@ S3 returns 403 for missing keys when ListBucket is absent, as it is on this API 
 - Worker ECR repository: no images at inspection time.
 - Configured Aircloud endpoint: running, one 4090 replica; serving URL is a Jupyter workspace behind Aircloud login. Status alone does not prove `worker/main.py` is consuming the Frith queue.
 - The local AWS principal is excluded from raw data access; the API role trusts ECS tasks only. Use an API-role task or an engineer-approved access path; do not widen policies just for this local test.
+- Live bridge attempt with the local AWS identity returned `AccessDenied` at raw upload, before enqueue. The running demo correctly entered Failed/Retry and denied media; no GPU success was claimed.
+- Final container image built and includes boto3. GPU-mode container startup smoke checks stalled in Docker before the containers started; the native Rust process was used for the live failure-path test instead.
 - A live GPU completion has not been verified. The engineer must have `worker/main.py` running with the existing worker credentials, bucket names and queue URLs. This connector makes no changes to that process.
 
 ## Tests
