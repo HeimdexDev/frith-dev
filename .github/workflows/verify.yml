@@ -1,0 +1,64 @@
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-and-frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install pinned Lean toolchain
+        run: bash scripts/bootstrap-lean.sh
+      - name: Verify release proofs and runtime
+        run: bash scripts/verify.sh
+      - name: Verify frontend
+        run: |
+          cargo fmt --manifest-path frontend/Cargo.toml --check
+          cargo clippy --manifest-path frontend/Cargo.toml --locked --all-targets -- -D warnings
+          cargo test --manifest-path frontend/Cargo.toml --locked
+          node --test frontend/tests/comparison.test.cjs
+
+  worker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libgl1 libglib2.0-0
+          # Detector tests use scripted boxes; GPU/model inference is a separate gate.
+          sed -n '/^numpy==/p; /^opencv-python==/p; /^boto3==/p' worker/requirements.txt > /tmp/worker-test-requirements.txt
+          python -m pip install -r /tmp/worker-test-requirements.txt
+      - name: Verify worker
+        working-directory: worker
+        run: python -m unittest discover -s tests
+
+  infrastructure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.10.5'
+      - run: terraform fmt -check -recursive infra
+      - run: terraform -chdir=infra/environments/poc init -backend=false -input=false -lockfile=readonly
+      - run: terraform -chdir=infra/environments/poc validate
+      - run: bash -n infra/scripts/e2e_contract_test.sh
