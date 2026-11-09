@@ -18,8 +18,62 @@ pub struct PageQuery {
     pub tab: Option<String>,
     pub q: Option<String>,
     pub clip: Option<usize>,
+    pub view: Option<WorkspaceView>,
+    pub stage: Option<PackageStage>,
+}
+/// Presentation context only; ownership and grants remain the authorization boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceView {
+    Buying,
+    Supplying,
+}
+impl WorkspaceView {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Buying => "buying",
+            Self::Supplying => "supplying",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Buying => "Buying",
+            Self::Supplying => "Supplying",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageStage {
+    #[default]
+    All,
+    Processing,
+    Review,
+    Ready,
+    Failed,
+    Shared,
+}
+impl PackageStage {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Processing => "processing",
+            Self::Review => "review",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+            Self::Shared => "shared",
+        }
+    }
 }
 impl PageQuery {
+    pub fn workspace_view(&self, org: &str) -> WorkspaceView {
+        self.view.unwrap_or_else(|| match self.tab.as_deref() {
+            Some("received") => WorkspaceView::Buying,
+            Some("shared") => WorkspaceView::Supplying,
+            _ if org == "heimdex" => WorkspaceView::Supplying,
+            _ => WorkspaceView::Buying,
+        })
+    }
     fn org(&self) -> ApiResult<&str> {
         let org = self.org.as_deref().unwrap_or("heimdex");
         if ORGS.iter().any(|o| o.0 == org) {

@@ -85,17 +85,6 @@ impl DataRequest {
             "Finding matches"
         }
     }
-    pub fn next_action(&self) -> &'static str {
-        if self.package_id.is_some() {
-            "Seller reviews and grants access"
-        } else if self.agreed {
-            "Seller prepares sharing package"
-        } else if self.offer.is_some() {
-            "Buyer reviews proposed scope"
-        } else {
-            "Seller proposes footage"
-        }
-    }
 }
 /// Frozen request scope for a package; dataset revision still tracks review/access mutations.
 #[derive(Clone, Debug, Serialize, Deserialize)]
