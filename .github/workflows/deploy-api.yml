@@ -1,0 +1,78 @@
+name: deploy-api
+
+# Build ARM64 API image -> Trivy scan -> push :<sha> and the moving deploy tag
+# -> force a new ECS deployment (task definition points at the moving tag).
+#
+# This file assumes the API source lives in this repository at $API_CONTEXT.
+# If the app lives in another repo, copy this workflow there and make sure
+# var.github_repo (OIDC trust) names THAT repo.
+#
+# Repository variables: AWS_ROLE_ARN, AWS_REGION, ECR_API_REPOSITORY (repo name,
+# e.g. frith-poc-api), ECS_CLUSTER, ECS_SERVICE, API_IMAGE_TAG (default poc).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "api/**" # TODO: set to the real API source path
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+env:
+  API_CONTEXT: api # TODO: path to the directory containing the API Dockerfile
+
+jobs:
+  deploy:
+    # Native arm64 runner (matches Fargate ARM64). If unavailable on your plan,
+    # switch to ubuntu-24.04 + QEMU/buildx.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: build
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_API_REPOSITORY }}
+        run: |
+          docker build --platform linux/arm64 -t "$IMAGE:${GITHUB_SHA}" "$API_CONTEXT"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: trivy scan (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@<PIN_VERSION> # TODO: pin a verified release tag or commit SHA
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: push
+        env:
+          DEPLOY_TAG: ${{ vars.API_IMAGE_TAG || 'poc' }}
+        run: |
+          docker tag "$IMAGE:${GITHUB_SHA}" "$IMAGE:${DEPLOY_TAG}"
+          docker push "$IMAGE:${GITHUB_SHA}"
+          docker push "$IMAGE:${DEPLOY_TAG}"
+
+      - name: deploy
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --service "${{ vars.ECS_SERVICE }}" \
+            --force-new-deployment > /dev/null
+          aws ecs wait services-stable \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --services "${{ vars.ECS_SERVICE }}"

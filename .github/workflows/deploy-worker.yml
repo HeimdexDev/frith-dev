@@ -1,0 +1,63 @@
+name: deploy-worker
+
+# Build the anonymization worker image -> Trivy scan -> push to ECR.
+# The worker runs on Aircloud (outside AWS); Aircloud pulls the image from ECR
+# with the external worker role (docs/gpu-adapter.md). Rolling the running
+# Aircloud worker to the new tag is done on the Aircloud side.
+#
+# Repository variables: AWS_ROLE_ARN, AWS_REGION, ECR_WORKER_REPOSITORY
+# (repo name, e.g. frith-poc-worker), WORKER_PLATFORM (default linux/amd64;
+# set to match the Aircloud GPU host architecture).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**" # TODO: set to the real worker source path
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+env:
+  WORKER_CONTEXT: worker # TODO: path to the directory containing the worker Dockerfile
+
+jobs:
+  push:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: build
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_WORKER_REPOSITORY }}
+          PLATFORM: ${{ vars.WORKER_PLATFORM || 'linux/amd64' }}
+        run: |
+          docker build --platform "$PLATFORM" -t "$IMAGE:${GITHUB_SHA}" "$WORKER_CONTEXT"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: trivy scan (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@<PIN_VERSION> # TODO: pin a verified release tag or commit SHA
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: push
+        run: |
+          docker push "$IMAGE:${GITHUB_SHA}"
+          echo "pushed $IMAGE:${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
