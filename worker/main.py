@@ -14,11 +14,12 @@ import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from face_blur import PIPELINE_VERSION
+from face_blur.detector import WeightsError, verify_weights
 from face_blur.pipeline import BlurParams, PipelineError, VideoResult, process_video, sha256_file
 
 LOG = logging.getLogger("frith.worker")
@@ -116,9 +117,9 @@ def parse_job(job: Mapping, config: Config) -> JobSpec:
         raise invalid("output.key_prefix is outside SAFE_PREFIX")
     if params.get("method", "blur") != "blur":
         raise PipelineError("UNSUPPORTED_METHOD", "only the blur method is supported", False)
-    min_face_px = params.get("min_face_px", 0)
-    if not isinstance(min_face_px, int) or isinstance(min_face_px, bool) or min_face_px < 0:
-        raise invalid("params.min_face_px must be a non-negative integer")
+    # A job must not be able to narrow what gets blurred.
+    if "min_face_px" in params:
+        LOG.info("job %s: ignoring params.min_face_px, using 0", job_id)
     return JobSpec(
         job_id=job_id,
         raw_bucket=raw["bucket"],
@@ -126,7 +127,7 @@ def parse_job(job: Mapping, config: Config) -> JobSpec:
         raw_sha256=raw["sha256"],
         output_bucket=output["bucket"],
         output_key=prefix + OUTPUT_FILENAME,
-        params=BlurParams(min_face_px=min_face_px),
+        params=BlurParams(min_face_px=0),
     )
 
 
@@ -178,6 +179,7 @@ class Worker:
             "finished_at": fields.get("finished_at"),
             "model_digest": self.model_digest,
             "pipeline_version": PIPELINE_VERSION,
+            **fields.get("stats", {}),
         }
 
     def _failed(self, job_id: str, started_at: str, code: str, message: str, retryable: bool) -> dict:
@@ -251,7 +253,9 @@ class Worker:
             "bytes": video.bytes,
             "version_id": version_id,
         }
-        return self._message(job_id, "succeeded", started_at, output=output, finished_at=utc_now())
+        return self._message(
+            job_id, "succeeded", started_at, output=output, finished_at=utc_now(), stats=asdict(video.stats)
+        )
 
     def handle_message(self, message: Mapping) -> None:
         receipt = message["ReceiptHandle"]
@@ -345,6 +349,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     config = Config.from_env(os.environ)
+    try:
+        model_digest = verify_weights(args.weights)
+    except WeightsError as exc:
+        raise SystemExit(str(exc)) from exc
     from face_blur.detector import Detector
 
     defaults = BlurParams()
@@ -356,7 +364,7 @@ def main() -> None:
         return process_video(src, dst, detector, params, boxes)
 
     session = assumed_role_session(config)
-    worker = Worker(config, session.client("sqs"), session.client("s3"), process, sha256_file(args.weights))
+    worker = Worker(config, session.client("sqs"), session.client("s3"), process, model_digest)
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: worker.stop.set())
     LOG.info("worker %s started", config.worker_id)

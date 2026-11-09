@@ -114,8 +114,9 @@ data "aws_iam_policy_document" "worker" {
   }
 
   statement {
-    sid       = "ReadRaw"
-    actions   = ["s3:GetObject"]
+    sid = "ReadRaw"
+    # The job message pins raw.version_id; reading a specific version needs GetObjectVersion.
+    actions   = ["s3:GetObject", "s3:GetObjectVersion"]
     resources = ["${var.raw_bucket_arn}/*"]
   }
 

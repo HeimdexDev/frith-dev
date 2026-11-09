@@ -56,6 +56,20 @@ data "aws_iam_policy_document" "raw_key" {
       identifiers = [var.worker_role_arn]
     }
   }
+
+  # Without this the bucket policy admits break-glass principals but KMS refuses them.
+  dynamic "statement" {
+    for_each = length(var.break_glass_principal_arns) > 0 ? [1] : []
+    content {
+      sid       = "BreakGlass"
+      actions   = ["kms:GenerateDataKey", "kms:Decrypt", "kms:DescribeKey"]
+      resources = ["*"]
+      principals {
+        type        = "AWS"
+        identifiers = var.break_glass_principal_arns
+      }
+    }
+  }
 }
 
 data "aws_iam_policy_document" "safe_key" {
@@ -86,6 +100,19 @@ data "aws_iam_policy_document" "safe_key" {
     principals {
       type        = "AWS"
       identifiers = [var.api_role_arn]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(var.break_glass_principal_arns) > 0 ? [1] : []
+    content {
+      sid       = "BreakGlass"
+      actions   = ["kms:GenerateDataKey", "kms:Decrypt", "kms:DescribeKey"]
+      resources = ["*"]
+      principals {
+        type        = "AWS"
+        identifiers = var.break_glass_principal_arns
+      }
     }
   }
 }
