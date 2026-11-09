@@ -10,7 +10,7 @@ From the repository root, with the repository's Rust 1.95 toolchain:
 cargo run --manifest-path frontend/Cargo.toml --locked
 ```
 
-Open <http://127.0.0.1:3000>. The server binds only to loopback. The first build downloads dependencies; subsequent builds can use `--offline`. Stop with Ctrl-C. All mock state is shared by tabs and resets when the server restarts.
+Open <http://127.0.0.1:3000>. To preview a separate checkout while another demo is running, set `FRITH_DEMO_PORT=3107` before the run command and open <http://127.0.0.1:3107>. Binding remains loopback-only. The server binds only to loopback. The first build downloads dependencies; subsequent builds can use `--offline`. Stop with Ctrl-C. All mock state is shared by tabs and resets when the server restarts.
 
 ```sh
 cargo test --manifest-path frontend/Cargo.toml --locked
@@ -64,3 +64,9 @@ Framework reference: [Leptos rendering documentation](https://docs.rs/leptos/lat
 ## Comparison player and engineering handoff
 
 See [COMPARISON_HANDOFF.md](COMPARISON_HANDOFF.md) for the implemented player, GPU pair-manifest requirements, infrastructure streaming/access contracts, and acceptance checks. Comparison is owner-only, lazy-loads the original, and defaults to anonymized-only. Paired HTML video playback is best-effort, not guaranteed frame-exact review.
+
+## Heimdex product direction
+
+My files now introduces Discover → Match → Exchange. Discovery and marketplace matching are explicitly labeled as planned integrations; the dataset workflow remains a synthetic exchange demo. Owner detail and sharing copy distinguish face review from production export authorization.
+
+See [the wireframe comparison and redesign proposal](../docs/frith-redesign.md) for the six-screen mapping, buyer/seller workflow, demo sequence, and decisions required to integrate the newly merged infrastructure.
