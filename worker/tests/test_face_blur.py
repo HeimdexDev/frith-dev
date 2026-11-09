@@ -42,6 +42,14 @@ def boxes(*rows):
     return np.array(rows, np.float32).reshape(-1, 5)
 
 
+def blur_mask(rows, padding=1.2, size=400):
+    mask = np.zeros((size, size), bool)
+    for box in rows:
+        x1, y1, x2, y2 = expand_box(box, padding, size, size)
+        mask[y1:y2, x1:x2] = True
+    return mask
+
+
 class BoxLogicTest(unittest.TestCase):
     def test_padding_scales_around_center_and_clips(self):
         self.assertEqual(expand_box(boxes([40, 40, 60, 60, 0.9])[0], 1.2, 100, 100), (38, 38, 62, 62))
@@ -89,6 +97,54 @@ class BoxLogicTest(unittest.TestCase):
         filled = fill_gaps(detected, 1)
         self.assertEqual(len(filled[1]), 1)
         np.testing.assert_allclose(filled[1][0][:4], FACE[:4])
+
+    def test_hold_survives_when_only_another_face_overlaps(self):
+        face_a, face_b = boxes([100, 100, 200, 200, 0.9]), boxes([150, 100, 250, 200, 0.9])
+        for label, earlier in (("both tracked", np.concatenate([face_a, face_b])), ("a alone", face_a)):
+            with self.subTest(label):
+                holder = BoxHolder(hold_frames=3)
+                holder.update(earlier)
+                held = holder.update(face_b)
+                self.assertEqual(len(held), 1)
+                np.testing.assert_allclose(held[0][:4], face_a[0][:4])
+
+    def test_one_detection_cannot_cancel_two_tracks(self):
+        face_a, face_b = boxes([100, 100, 200, 200, 0.9]), boxes([110, 100, 210, 200, 0.9])
+        holder = BoxHolder(hold_frames=3)
+        holder.update(np.concatenate([face_a, face_b]))
+        held = holder.update(face_b)
+        self.assertEqual(len(held), 1)
+        np.testing.assert_allclose(held[0][:4], face_a[0][:4])
+
+    def test_merging_forward_and_backward_boxes_never_shrinks_the_blur(self):
+        ahead = boxes([100, 100, 200, 200, 0.9])
+        for shift in (0, 10, 30, 40, 60):
+            with self.subTest(shift=shift):
+                behind = boxes([100 + shift, 100, 200 + shift, 200, 0.8])
+                filled = fill_gaps([ahead, NO_BOXES, behind], 1)[1]
+                before = blur_mask(np.concatenate([ahead, behind]))
+                self.assertFalse((before & ~blur_mask(filled)).any())
+
+    def test_identical_forward_and_backward_boxes_are_merged(self):
+        filled = fill_gaps([boxes(FACE), NO_BOXES, boxes(FACE)], 1)[1]
+        self.assertEqual(len(filled), 1)
+
+    def test_tiny_boxes_are_blurred_at_minimum_size(self):
+        cases = {
+            "narrow": [50.1, 50.1, 50.4, 50.4],
+            "zero area": [50, 50, 50, 50],
+            "bottom right edge": [99.6, 99.6, 99.9, 99.9],
+            "top left edge": [0.1, 0.1, 0.4, 0.4],
+        }
+        for label, box in cases.items():
+            with self.subTest(label):
+                frame = np.zeros((100, 100, 3), np.uint8)
+                frame[::2, ::2] = 255
+                before = frame.copy()
+                blur_boxes(frame, boxes([*box[:4], 0.9]), 1.2)
+                x1, y1, x2, y2 = expand_box(boxes([*box[:4], 0.9])[0], 1.2, 100, 100)
+                self.assertEqual((min(x2 - x1, 2), min(y2 - y1, 2)), (2, 2))
+                self.assertFalse(np.array_equal(frame, before))
 
     def test_detection_stats(self):
         detected = [NO_BOXES, NO_BOXES, boxes(FACE), NO_BOXES, boxes(FACE)]
@@ -250,7 +306,28 @@ class ProcessVideoTest(unittest.TestCase):
         return process_video(source, self.dst, detector, params, self.log, limits)
 
     def log_lines(self):
-        return [json.loads(line) for line in self.log.read_text().splitlines()]
+        parsed = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return [line for line in parsed if "meta" not in line]
+
+    def test_box_log_records_metadata_and_applied_regions(self):
+        script = {0: boxes([150, 110, 170, 130, 0.9]), 5: boxes(FACE)}
+        self.run_video(self.h264(), ScriptedDetector(script), BlurParams(padding=1.2, hold_frames=2))
+        raw = [json.loads(line) for line in self.log.read_text().splitlines()]
+
+        meta = raw[0]["meta"]
+        self.assertEqual((meta["padding"], meta["hold_frames"]), (1.2, 2))
+        self.assertEqual((meta["width"], meta["height"]), (160, 120))
+        self.assertEqual(len(raw), 11)
+
+        frames = raw[1:]
+        # Padding extends past the frame on both axes, so the region is clamped.
+        self.assertEqual(frames[0]["blur_regions"], [[148, 108, 160, 120]])
+        self.assertEqual(frames[5]["blur_regions"], [[16, 16, 64, 64]])
+        self.assertEqual(frames[3]["filled"], [[20.0, 20.0, 60.0, 60.0, 0.9]])
+        self.assertEqual(frames[3]["blur_regions"], [[16, 16, 64, 64]])
+        self.assertEqual(frames[9]["blur_regions"], [])
+        for frame in frames:
+            self.assertEqual(len(frame["blur_regions"]), len(frame["boxes"]) + len(frame["filled"]))
 
     def test_writes_silent_faststart_video_and_box_log(self):
         src = self.dir / "in.mp4"
@@ -277,7 +354,10 @@ class ProcessVideoTest(unittest.TestCase):
         self.assertLess(data.index(b"moov"), data.index(b"mdat"))
         lines = self.log_lines()
         self.assertEqual(len(lines), 10)
-        self.assertEqual(lines[0], {"frame": 0, "boxes": [[20.0, 20.0, 60.0, 60.0, 0.9]], "filled": []})
+        self.assertEqual(
+            lines[0],
+            {"frame": 0, "boxes": [[20.0, 20.0, 60.0, 60.0, 0.9]], "filled": [], "blur_regions": [[16, 16, 64, 64]]},
+        )
         self.assertFalse((self.dir / "out.part.mp4").exists())
 
     def test_rotated_video_is_detected_upright(self):
