@@ -35,9 +35,12 @@ async fn renders_navigation_search_and_receiver_controls() {
     let app = frith_web::app();
     let (status, _, html) = request(app.clone(), "GET", "/", "").await;
     assert_eq!(status, 200);
-    assert!(html.contains("My files"));
+    assert!(html.contains("Data requests"));
+    assert!(html.contains("New data request"));
+    let (_, _, html) = request(app.clone(), "GET", "/?tab=files", "").await;
+    assert!(html.contains("Safe sharing"));
     assert!(html.contains("Seoul"));
-    let (_, _, html) = request(app.clone(), "GET", "/?q=zzzz", "").await;
+    let (_, _, html) = request(app.clone(), "GET", "/?tab=files&q=zzzz", "").await;
     assert!(html.contains("No datasets here yet"));
     let (_, _, html) = request(app.clone(), "GET", "/datasets/1?org=atlas", "").await;
     assert!(html.contains("Preview only"));
@@ -255,4 +258,112 @@ async fn media_ranges_support_seeking_without_bypassing_owner_checks() {
         .await
         .unwrap();
     assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn request_forms_preserve_input_and_handoff_is_separate_from_access() {
+    let app = frith_web::app();
+    let fields = "title=Box+task&task=Pick+an+object&criteria=Hands+visible&volume=20+clips&purpose=Evaluation&destination=Germany&seller=heimdex&action_data=any&perspective=&deadline=";
+    let (status, _, html) = request(
+        app.clone(),
+        "POST",
+        "/requests?org=atlas",
+        &fields.replace("title=Box+task", "title="),
+    )
+    .await;
+    assert_eq!(status, 422);
+    assert!(html.contains("Pick an object"));
+    assert!(html.contains("role=\"alert\""));
+    let (status, headers, _) = request(app.clone(), "POST", "/requests?org=atlas", fields).await;
+    assert_eq!(status, 303);
+    assert_eq!(headers["location"], "/requests/2?org=atlas");
+    assert_eq!(
+        request(app.clone(), "GET", "/requests/2?org=northstar", "")
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        request(app.clone(), "GET", "/requests/2/edit?org=heimdex", "")
+            .await
+            .0,
+        403
+    );
+    let edit = format!("revision=1&{fields}")
+        .replace("title=Box+task", "title=%3Cscript%3Ex%3C%2Fscript%3E");
+    assert_eq!(
+        request(app.clone(), "POST", "/requests/2/edit?org=atlas", &edit)
+            .await
+            .0,
+        303
+    );
+    let (_, _, html) = request(app.clone(), "GET", "/requests/2?org=atlas", "").await;
+    assert!(html.contains("&lt;script&gt;"));
+    assert!(!html.contains("<script>x</script>"));
+    assert!(!html.contains("name=\"source_id\""));
+    assert_eq!(
+        request(
+            app.clone(),
+            "POST",
+            "/requests/2/change?org=heimdex",
+            "revision=2&action=offer&source_id=2&terms=Two+sample+clips+for+evaluation"
+        )
+        .await
+        .0,
+        303
+    );
+    let (_, _, html) = request(app.clone(), "GET", "/requests/2?org=atlas", "").await;
+    assert!(html.contains("Agree to proposed scope"));
+    assert!(!html.contains("/original/"));
+    assert!(!html.contains("/media/"));
+    assert_eq!(
+        request(
+            app.clone(),
+            "POST",
+            "/requests/2/change?org=atlas",
+            "revision=3&action=agree"
+        )
+        .await
+        .0,
+        303
+    );
+    let (status, headers, _) = request(
+        app.clone(),
+        "POST",
+        "/requests/2/change?org=heimdex",
+        "revision=4&action=prepare",
+    )
+    .await;
+    assert_eq!(status, 303);
+    assert_eq!(headers["location"], "/datasets/6?org=heimdex");
+    assert_eq!(
+        request(app.clone(), "GET", "/datasets/6?org=atlas", "")
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        request(app.clone(), "GET", "/datasets/6/media/0?org=atlas", "")
+            .await
+            .0,
+        404
+    );
+    let (_, _, html) = request(app.clone(), "GET", "/requests/2?org=atlas", "").await;
+    assert!(html.contains("Waiting for the seller to finish review"));
+    assert!(!html.contains("href=\"/datasets/6"));
+    let (_, _, html) = request(app.clone(), "GET", "/datasets/6?org=heimdex", "").await;
+    assert!(html.contains("Request #2"));
+    assert!(html.contains("Finish processing"));
+    assert!(!html.contains("Share dataset"));
+    assert_eq!(
+        request(
+            app,
+            "POST",
+            "/requests/2/change?org=heimdex",
+            "revision=4&action=prepare"
+        )
+        .await
+        .0,
+        409
+    );
 }

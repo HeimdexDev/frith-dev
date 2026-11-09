@@ -1,12 +1,16 @@
 use crate::{PageQuery, api::*};
 use leptos::prelude::*;
-fn shell(org: &str, tab: &str, content: impl IntoView) -> String {
+pub(crate) fn shell(org: &str, tab: &str, content: impl IntoView) -> String {
     let nav = [
-        ("files", "▤", "My files"),
-        ("received", "↙", "Shared with me"),
-        ("shared", "↗", "Shared by me"),
+        ("requests", "◎", "Data requests"),
+        ("files", "▤", "Safe sharing"),
         ("activity", "◷", "Activity"),
     ];
+    let tab = if matches!(tab, "received" | "shared") {
+        "files"
+    } else {
+        tab
+    };
     let html = view! {
         <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
         <title>"Frith by Heimdex"</title><link rel="stylesheet" href="/assets/style.css"/><script src="/assets/app.js" defer></script></head>
@@ -38,7 +42,7 @@ pub fn index(org: &str, query: &PageQuery, datasets: Vec<Dataset>, events: Vec<E
         "received" => "Shared with me",
         "shared" => "Shared by me",
         "activity" => "Activity",
-        _ => "My files",
+        _ => "Safe sharing",
     };
     let search = query.q.as_deref().unwrap_or("");
     let filtered: Vec<_> = datasets
@@ -55,8 +59,8 @@ pub fn index(org: &str, query: &PageQuery, datasets: Vec<Dataset>, events: Vec<E
     shell(
         org,
         tab,
-        view! { <section class="page"><header class="page-heading"><div><div class="eyebrow">"LIBRARY"</div><h1>{title}</h1></div>{(tab != "activity").then(|| view! { <a class="button primary" href=format!("/datasets/new?org={org}")>"＋ New dataset"</a> })}</header>
-            {(tab == "files").then(exchange_context)}
+        view! { <section class="page"><header class="page-heading"><div><div class="eyebrow">"LIBRARY"</div><h1>{title}</h1></div>{(tab != "activity").then(|| view! { <a class="button primary" href=format!("/datasets/new?org={org}")>"＋ New sharing package"</a> })}</header>
+            {(tab != "activity").then(|| view! { <div class="section-tabs" aria-label="Sharing views">{[("files", "My packages"), ("received", "Shared with me"), ("shared", "Shared by me")].into_iter().map(|(key,label)| view! { <a class=if tab == key { "selected" } else { "" } aria-current=if tab == key { Some("page") } else { None } href=format!("/?org={org}&tab={key}")>{label}</a> }).collect_view()}</div> })}
             {if tab == "activity" { view! { <div class="activity-list">{events.into_iter().map(|e| view! { <div class="event"><span class="event-icon">"↗"</span><div>{e.text}<small>"This demo session"</small></div></div> }).collect_view()}</div> }.into_any() } else { view! {
             <div class="toolbar"><span>{format!("{count} {}", if count == 1 { "dataset" } else { "datasets" })}</span><form class="search" method="get" action="/"><input type="hidden" name="org" value=org.to_string()/><input type="hidden" name="tab" value=tab.to_string()/><input name="q" aria-label="Search datasets" placeholder="Search datasets…" value=search.to_string()/><button type="submit" aria-label="Search">"⌕"</button></form></div>
             <div class="table-wrap"><table><thead><tr><th>"Name"</th><th>"Videos"</th><th>"Face anonymization"</th><th>{if tab == "received" { "Owner" } else { "Shared with" }}</th><th>"Processing location"</th></tr></thead><tbody>
@@ -69,31 +73,16 @@ pub fn index(org: &str, query: &PageQuery, datasets: Vec<Dataset>, events: Vec<E
         </section> },
     )
 }
-fn exchange_context() -> impl IntoView {
-    view! {
-        <section class="exchange-context" aria-labelledby="exchange-title">
-            <div class="eyebrow">"THE HEIMDEX VISION"</div>
-            <h2 id="exchange-title">"From existing video to useful robotics data"</h2>
-            <p>"Start with a buyer’s task. Find relevant footage, agree how it can be used, and deliver an approved dataset through Frith."</p>
-            <ol class="exchange-stages">
-                <li><strong>"1. Discover"</strong><p>"Find task-specific moments in the seller’s indexed video archive."</p><small>"Heimdex · integration planned"</small></li>
-                <li><strong>"2. Match"</strong><p>"Connect the buyer’s requirements with available footage and usage rights."</p><small>"Marketplace · integration planned"</small></li>
-                <li class="exchange-current"><strong>"3. Exchange"</strong><p>"Review processed videos, grant recipient access, and revoke future retrieval."</p><small>"Frith · synthetic demo below"</small></li>
-            </ol>
-        </section>
-    }
-}
-
 pub fn new_dataset(org: &str) -> String {
     shell(
         org,
         "files",
-        view! { <section class="page narrow"><a class="back" href=format!("/?org={org}")>"← My files"</a><header class="page-heading"><div><div class="eyebrow">"NEW DATASET"</div><h1>"Start with your videos"</h1></div></header>
+        view! { <section class="page narrow"><a class="back" href=format!("/?org={org}&tab=files")>"← Safe sharing"</a><header class="page-heading"><div><div class="eyebrow">"NEW SHARING PACKAGE"</div><h1>"Start with your videos"</h1></div></header>
         <form method="post" action=format!("/datasets?org={org}") class="create-form"><label for="name">"Dataset name"</label><input id="name" name="name" placeholder="e.g. Warehouse · morning shift" required maxlength="100" autofocus/>
         <label for="videos">"Videos"</label><div class="dropzone"><span class="upload-icon">"↑"</span><strong>"Choose videos"</strong><span>"MP4, MOV or WebM · Up to 50 files"</span><input id="videos" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" multiple aria-describedby="mock-note"/><button class="button" type="button" id="use-sample">"Use sample videos"</button></div>
         <textarea id="files" name="files" hidden required></textarea><div id="file-list" role="status" aria-live="polite"></div>
         <div class="location-card"><span>"◎"</span><div><strong>{jurisdiction(org).to_string()}</strong><small>"Face processing location · Set by your organization"</small></div></div>
-        <p class="muted" id="mock-note">"Demo: only filenames are registered. No video bytes are uploaded or processed."</p><div class="form-actions"><a class="button" href=format!("/?org={org}")>"Cancel"</a><button class="button primary" id="create-button" disabled>"Create dataset"</button></div></form></section> },
+        <p class="muted" id="mock-note">"Demo: only filenames are registered. No video bytes are uploaded or processed."</p><div class="form-actions"><a class="button" href=format!("/?org={org}&tab=files")>"Cancel"</a><button class="button primary" id="create-button" disabled>"Create sharing package"</button></div></form></section> },
     )
 }
 pub fn detail(org: &str, d: Dataset, clip: usize) -> String {
@@ -105,9 +94,10 @@ pub fn detail(org: &str, d: Dataset, clip: usize) -> String {
     shell(
         org,
         tab,
-        view! { <section class="page"><a class="back" href=format!("/?org={org}&tab={tab}")>{if owner { "← My files" } else { "← Shared with me" }}</a>
+        view! { <section class="page"><a class="back" href=format!("/?org={org}&tab={tab}")>{if owner { "← Safe sharing" } else { "← Shared with me" }}</a>
         <header class="page-heading"><div><div class="eyebrow">{format!("DATASET / {} / V1", org_name(&d.owner))}</div><h1>{d.name.clone()}</h1><div class="dataset-meta">{badge(d.status)}<span>{format!("{} videos", d.clips.len())}</span><span>{format!("Faces · {}", jurisdiction(&d.owner))}</span></div></div>
         <div class="actions">{can_download.then(|| view! { <a class="button" href=format!("/datasets/{}/download/{clip}?org={org}", d.id)>"↓ Download video"</a> })}{(owner && d.status == Status::Ready).then(|| view! { <button class="button primary" data-open="share-dialog">"Share dataset"</button> })}</div></header>
+        {d.request_origin.as_ref().map(|origin| view! { <div class="exchange-note"><a class="request-link" href=format!("/requests/{}?org={org}", origin.request_id)>{format!("Request #{} · Package v{}", origin.request_id, origin.version)}</a><p>{format!("Buyer: {} · Purpose: {} · Destination: {}", org_name(&origin.buyer), origin.requirements.purpose, origin.requirements.destination)}</p><small>"Agreed scope is frozen for this package. Access still requires completed review and a separate grant."</small></div> })}
         {owner.then(|| view! { <p class="exchange-note">"Face review prepares a dataset for sharing in this demo. Production delivery also requires rights clearance, an agreed purpose and recipient, and export authorization."</p> })}
         <div class="detail-grid"><section class="preview-card"><div class="preview-heading"><strong>{d.clips[clip].name.clone()}</strong><span>{if ready { "Anonymized derivative" } else { "Preview pending" }}</span></div>
         {if ready && owner { comparison_player(org, &d, clip).into_any() } else if ready { view! { <video controls preload="metadata" controlslist=if can_download { "" } else { "nodownload" } aria-label="Synthetic anonymized video preview" src=format!("/datasets/{}/media/{clip}?org={org}", d.id)>"Your browser does not support video playback."</video> }.into_any() } else { view! { <div class="preview-pending"><span>"◎"</span><h2>{d.status.label()}</h2><p>{if d.status == Status::Failed { "Retry processing to create a new preview." } else { "Your preview will appear after face processing." }}</p></div> }.into_any()}}
@@ -124,7 +114,7 @@ pub fn detail(org: &str, d: Dataset, clip: usize) -> String {
 fn share_dialog(org: &str, d: &Dataset) -> impl IntoView {
     view! { <dialog id="share-dialog" aria-labelledby="share-title"><div class="dialog-heading"><h2 id="share-title">"Share dataset"</h2><button class="icon-button" data-close="share-dialog" aria-label="Close dialog">"×"</button></div><p class="dialog-subtitle">{d.name.clone()}</p>
     <form method="post" action=format!("/datasets/{}/change?org={org}", d.id)><input type="hidden" name="revision" value=d.revision/><input type="hidden" name="action" value="share"/>
-    <label for="recipient">"Organization"</label><select id="recipient" name="recipient" required><option value="" disabled selected>"Select an invited organization"</option>{ORGS.into_iter().filter(|o| o.0 != org).map(|(id,name,_)| view! { <option value=id>{name}</option> }).collect_view()}</select>
+    <label for="recipient">"Organization"</label><select id="recipient" name="recipient" required><option value="" disabled selected>"Select an invited organization"</option>{ORGS.into_iter().filter(|o| o.0 != org && d.request_origin.as_ref().is_none_or(|r| r.buyer == o.0)).map(|(id,name,_)| view! { <option value=id>{name}</option> }).collect_view()}</select>
     <fieldset><legend>"Access"</legend><label class="permission"><input type="radio" name="permission" value="preview" checked/><div><strong>"Preview only"</strong><small>"Watch approved videos"</small></div></label><label class="permission"><input type="radio" name="permission" value="download"/><div><strong>"Preview + download"</strong><small>"Watch and download approved videos"</small></div></label></fieldset>
     <p class="muted">"Demo access to reviewed synthetic videos. This does not authorize a production export."</p><div class="form-actions"><button class="button" type="button" data-close="share-dialog">"Cancel"</button><button class="button primary">"Save access"</button></div></form></dialog> }
 }
