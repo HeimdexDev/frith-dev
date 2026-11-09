@@ -100,9 +100,9 @@ RECEIPT="$(jq -r '.Messages[0].ReceiptHandle // empty' "$WORK/recv.json")"
 [ -n "$RECEIPT" ] || { bad "no job received"; exit 1; }
 jq -r '.Messages[0].Body' "$WORK/recv.json" > "$WORK/got-job.json"
 [ "$(jq -r '.schema_version' "$WORK/got-job.json")" = "1" ] && ok "received job, schema_version 1" \
-  || bad "unexpected schema_version"
+  || { bad "unexpected schema_version; leaving message unacknowledged"; exit 1; }
 [ "$(jq -r '.job_id' "$WORK/got-job.json")" = "$JOB_ID" ] && ok "job_id matches" \
-  || bad "received a different job (queue not empty before the test?)"
+  || { bad "received a different job; leaving message unacknowledged"; exit 1; }
 
 worker_env s3api get-object --bucket "$RAW_BUCKET" --key "$RAW_KEY" --version-id "$RAW_VERSION" \
   "$WORK/w-source.mp4" >/dev/null
@@ -158,7 +158,8 @@ R_RECEIPT="$(jq -r '.Messages[0].ReceiptHandle // empty' "$WORK/res-recv.json")"
 [ -n "$R_RECEIPT" ] || { bad "no result received"; exit 1; }
 jq -r '.Messages[0].Body' "$WORK/res-recv.json" > "$WORK/got-result.json"
 [ "$(jq -r '.job_id + "/" + .status' "$WORK/got-result.json")" = "$JOB_ID/succeeded" ] \
-  && ok "result: job_id matches, status succeeded" || bad "unexpected result body"
+  && ok "result: job_id matches, status succeeded" \
+  || { bad "unexpected result body; leaving message unacknowledged"; exit 1; }
 admin s3api get-object --bucket "$SAFE_BUCKET" --key "$OUT_KEY" "$WORK/api-out.mp4" >/dev/null
 [ "$(sha256sum "$WORK/api-out.mp4" | cut -d' ' -f1)" = "$(jq -r '.output.sha256' "$WORK/got-result.json")" ] \
   && ok "safe object sha256 matches the result message" || bad "safe sha256 mismatch"
