@@ -5,11 +5,12 @@ import unittest
 from pathlib import Path
 
 import main as worker_main
-from face_blur.pipeline import BlurParams, PipelineError, VideoResult
+from face_blur.pipeline import BlurParams, DetectionStats, PipelineError, VideoResult
 
 RAW = b"raw video bytes"
 RAW_SHA = hashlib.sha256(RAW).hexdigest()
 JOB_ID = "job-1"
+STATS = DetectionStats(24, 20, 2, 3, False)
 
 ENV = {
     "AWS_REGION": "ap-northeast-2",
@@ -73,7 +74,7 @@ class Fakes:
         self.params = params
         dst.write_bytes(b"blurred")
         digest = hashlib.sha256(b"blurred").hexdigest()
-        return VideoResult(str(dst), digest, 7, 2, 2, 24, 1, 1000, 24, 0.1, "cpu", "libx264", params)
+        return VideoResult(str(dst), digest, 7, 2, 2, 24, 1, 1000, 24, 0.1, "cpu", "libx264", params, STATS)
 
 
 def make_worker(fakes, **env):
@@ -157,10 +158,28 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(fakes.sent[-1]["error"]["code"], "INVALID_JOB")
         self.assertNotIn("download", fakes.events)
 
-    def test_explicit_min_face_px_is_honored(self):
+    def test_job_min_face_px_is_ignored_and_logged(self):
+        for value in (24, 1000000, "not-a-number", None):
+            with self.subTest(value):
+                fakes = Fakes()
+                with self.assertLogs("frith.worker", "INFO") as logs:
+                    make_worker(fakes).handle_message(job(params={"method": "blur", "min_face_px": value}))
+                self.assertEqual(fakes.params.min_face_px, 0)
+                self.assertEqual(fakes.sent[-1]["status"], "succeeded")
+                self.assertEqual(sum("min_face_px" in line for line in logs.output), 1)
+
+    def test_detection_stats_are_reported_without_changing_status(self):
         fakes = Fakes()
-        make_worker(fakes).handle_message(job(params={"method": "blur", "min_face_px": 24}))
-        self.assertEqual(fakes.params.min_face_px, 24)
+        make_worker(fakes).handle_message(job())
+        result = fakes.sent[-1]
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            {key: result[key] for key in
+             ("frames_total", "frames_with_faces", "frames_filled", "longest_zero_run_frames", "no_faces_detected")},
+            {"frames_total": 24, "frames_with_faces": 20, "frames_filled": 2,
+             "longest_zero_run_frames": 3, "no_faces_detected": False},
+        )
+        self.assertNotIn("frames_total", fakes.sent[0])
 
     def test_unexpected_error_hides_details(self):
         fakes = Fakes()
