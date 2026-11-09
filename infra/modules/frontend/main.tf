@@ -99,6 +99,12 @@ resource "aws_cloudfront_distribution" "web" {
     cached_methods         = ["GET", "HEAD"]
     compress               = true
     cache_policy_id        = data.aws_cloudfront_cache_policy.optimized.id
+
+    # SPA routing on the web behavior only; /api/* keeps the API's own status codes.
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.spa_rewrite.arn
+    }
   }
 
   dynamic "ordered_cache_behavior" {
@@ -115,18 +121,8 @@ resource "aws_cloudfront_distribution" "web" {
     }
   }
 
-  # SPA client-side routing.
-  custom_error_response {
-    error_code         = 403
-    response_code      = 200
-    response_page_path = "/index.html"
-  }
-
-  custom_error_response {
-    error_code         = 404
-    response_code      = 200
-    response_page_path = "/index.html"
-  }
+  # No custom_error_response: it is distribution-wide, so it would also turn an API 403/404
+  # into "200 index.html". SPA routing is the spa_rewrite function on the web behavior.
 
   restrictions {
     geo_restriction {
@@ -180,4 +176,12 @@ resource "aws_s3_bucket_policy" "web" {
   policy = data.aws_iam_policy_document.web.json
 
   depends_on = [aws_s3_bucket_public_access_block.web]
+}
+
+resource "aws_cloudfront_function" "spa_rewrite" {
+  name    = "${var.name}-spa-rewrite"
+  runtime = "cloudfront-js-2.0"
+  comment = "Serve index.html for extension-less web paths"
+  publish = true
+  code    = file("${path.module}/spa_rewrite.js")
 }

@@ -110,6 +110,12 @@ Sent by the worker, consumed by the API.
   redelivery, which idempotency absorbs.
 - **Never** copy raw bytes anywhere except the worker's local scratch; delete scratch after
   each job.
+- **Approval pins a version.** The worker reads `raw.version_id` exactly (role has
+  `s3:GetObjectVersion`) and returns the safe object's `version_id` with its `sha256`. On
+  approval the API stores that `version_id` + `sha256` and presigns every preview/download
+  with `VersionId=<approved>`; a later rerun that writes the same key creates a new version
+  that receivers never see until it is reviewed and approved itself. A retry after a
+  rejection uses a new `job_id`.
 
 The endpoint env template is `infra/env/aircloud-worker.env.example`; render it with
 `python3 -I infra/scripts/render_env.py worker`.

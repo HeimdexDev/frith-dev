@@ -94,9 +94,11 @@ data "aws_iam_policy_document" "task" {
   }
 
   # Safe: presign GET for preview/download after the API's authorization check.
+  # GetObjectVersion: presign the VersionId recorded at approval, so a later worker
+  # rerun that overwrites the key cannot change what receivers get.
   statement {
     sid       = "SafePresignDownload"
-    actions   = ["s3:GetObject"]
+    actions   = ["s3:GetObject", "s3:GetObjectVersion"]
     resources = ["${var.safe_bucket_arn}/*"]
   }
 
