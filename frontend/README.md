@@ -1,6 +1,6 @@
 # Frith frontend
 
-A runnable, local-only Rust web app for the private exchange UX. Leptos 0.8 renders the UI on the server; Axum handles navigation and forms. A small JavaScript file enhances native dialogs and the file picker. No Node runtime, WASM build, Trunk, AWS, credentials, or Lean checker is required. Form submissions navigate to fresh server-rendered pages (this is not a hydrated SPA).
+A runnable Rust demo for the private exchange UX. Leptos 0.8 renders the UI on the server; Axum handles navigation and forms. A small JavaScript file enhances native dialogs and the file picker. No Node runtime, WASM build, Trunk, AWS, credentials, or Lean checker is required. Form submissions navigate to fresh server-rendered pages (this is not a hydrated SPA).
 
 ## Run
 
@@ -10,7 +10,24 @@ From the repository root, with the repository's Rust 1.95 toolchain:
 cargo run --manifest-path frontend/Cargo.toml --locked
 ```
 
-Open <http://127.0.0.1:3000>. To preview a separate checkout while another demo is running, set `FRITH_DEMO_PORT=3107` before the run command and open <http://127.0.0.1:3107>. Binding remains loopback-only. The server binds only to loopback. The first build downloads dependencies; subsequent builds can use `--offline`. Stop with Ctrl-C. All mock state is shared by tabs and resets when the server restarts.
+Open <http://127.0.0.1:3000>. To preview a separate checkout while another demo is running, set `FRITH_DEMO_PORT=3107` before the run command and open <http://127.0.0.1:3107>. The server binds to loopback by default. The first build downloads dependencies; subsequent builds can use `--offline`. Stop with Ctrl-C. All mock state is shared by tabs and resets when the server restarts.
+
+## Run the container demo
+
+From the repository root:
+
+```sh
+docker build -t frith-demo:local frontend
+docker run --rm --name frith-demo -p 127.0.0.1:3112:3000 frith-demo:local
+```
+
+Open <http://127.0.0.1:3112>. Stop it with `docker stop frith-demo` from another terminal. The image includes the UI and synthetic sample media and runs as a non-root user. The worker image is separate and is not needed for this demo.
+
+For a container host, use `frontend/Dockerfile` with build context `frontend/`, route traffic to port 3000, and set the health check to `GET /healthz` (200, body `ok`). The image listens on `0.0.0.0` inside the container. Hosts may override `PORT`; `FRITH_DEMO_PORT` takes precedence if set. Outside Docker, use `FRITH_DEMO_BIND=0.0.0.0` explicitly to accept traffic from another host. Invalid bind addresses or ports fail at startup.
+
+Build for the destination architecture, e.g. `docker build --platform linux/amd64 -t frith-demo:local frontend` for an x86 host or `linux/arm64` for ARM. This is a server-rendered application, so it needs a running container/process; uploading the files to the existing static S3 frontend does not run it.
+
+Use one instance for a demo session: all visitors share in-memory state, can switch sample organizations, and lose changes on restart. Use synthetic/demo data only. Hosting behind an HTTPS endpoint gives viewers a shareable URL; no production API, login integration, AWS provisioning or deployment workflow is required for this demo package.
 
 ```sh
 cargo test --manifest-path frontend/Cargo.toml --locked
@@ -79,7 +96,7 @@ frontend/
 
 - Face anonymization only. Voice, badges, screens and location-metadata redaction are not implemented.
 - Filename selection registers metadata only; no real file upload, face detection, blurring, residency enforcement or export authorization occurs. All previews and individual-video downloads use the same bundled eight-second synthetic MP4. It has no audio.
-- The organization switcher is **demo impersonation, not authentication**. Do not expose this mock server publicly or use customer data. Tenant and permission guards demonstrate expected application behavior but are not a production security boundary.
+- The organization switcher is **demo impersonation, not authentication**. A hosted demo lets every visitor switch sample organizations and change shared demo state; use only synthetic/demo data. Tenant and permission guards demonstrate expected application behavior but are not a production security boundary.
 - Native `<dialog>` supplies focus management, Escape dismissal and focus return. The layout adapts to narrow screens; wide data tables scroll horizontally.
 - Preview-only denies the download endpoint; it cannot prevent a recipient from recording or saving already delivered media bytes. Revocation cannot erase bytes already received.
 - The frontend has no persistent storage, connected background worker, async job polling, real timestamps, pagination, dataset editing, bulk download or actual backend client. The separate `worker/` implementation is not wired to this demo. Processing advances using labeled mock controls.
@@ -97,3 +114,7 @@ See [COMPARISON_HANDOFF.md](COMPARISON_HANDOFF.md) for the implemented player, G
 Data requests implements the request/proposal/agreement workflow and hands off to Safe sharing. Matching remains simulated with seller-selected whole datasets. Owner detail and sharing copy distinguish commercial scope, face review and production export authorization.
 
 See [the wireframe comparison and redesign proposal](../docs/frith-redesign.md) for the six-screen mapping, buyer/seller workflow, demo sequence, and decisions required to integrate the newly merged infrastructure.
+
+## Optional real GPU processing
+
+See [GPU demo setup](gpu/README.md) to connect Process to the existing AWS queue and face-blur worker using a fixed server-selected sample. GPU mode replaces manual completion controls with job submission, pending refresh, failure/retry and actual result playback. The sample organizations and marketplace remain simulated. No deployment workflow changes are needed.
