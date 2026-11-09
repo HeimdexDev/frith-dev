@@ -5,11 +5,35 @@ pure helpers stay importable without them.
 """
 from __future__ import annotations
 
+import os
+import re
 from math import ceil
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+from face_blur.pipeline import sha256_file
+
+EXPECTED_WEIGHTS_SHA256 = "9420a9d4933940d2202f511d45df1750e3c1546dd9efc7a3985caae3bbbf7ed2"
+WEIGHTS_SHA256_ENV = "FACE_BLUR_WEIGHTS_SHA256"
+
+
+class WeightsError(Exception):
+    """The weights file is missing or is not the expected one."""
+
+
+def verify_weights(path: str | Path) -> str:
+    """Check the weights against the expected hash before they are loaded; return the digest."""
+    expected = os.environ.get(WEIGHTS_SHA256_ENV) or EXPECTED_WEIGHTS_SHA256
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise WeightsError(f"{WEIGHTS_SHA256_ENV} must be 64 lowercase hex characters")
+    if not Path(path).is_file():
+        raise WeightsError("weights file not found")
+    actual = sha256_file(path)
+    if actual != expected:
+        raise WeightsError(f"weights SHA-256 mismatch: expected {expected}, got {actual}")
+    return actual
 
 
 def empty_boxes() -> np.ndarray:

@@ -1,9 +1,11 @@
-"""Decode, detect, blur and encode one video.
+"""Detect faces across a whole video, fill gaps, then blur and encode it.
+
+Pass 1 decodes and detects every frame, keeping only boxes in memory. Filling needs the whole
+timeline: a face first detected at frame k may already be visible in the frames before it.
+Pass 2 decodes again, blurs, and encodes.
 
 TODO(VFR): the source is resampled to its nominal frame rate. Normalize variable-frame-rate
 input once before branching, or keep an exact timestamp mapping (COMPARISON_HANDOFF.md).
-TODO(rotation): rotation metadata is ignored. -noautorotate keeps decoded frames aligned with
-the probed size, so rotated input comes out in its coded orientation.
 """
 from __future__ import annotations
 
@@ -12,7 +14,9 @@ import json
 import math
 import os
 import subprocess
+import threading
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -20,6 +24,9 @@ from typing import Protocol
 
 import cv2
 import numpy as np
+
+MATCH_IOU = 0.3
+MIN_FRAME_ALLOWANCE = 2
 
 
 class PipelineError(Exception):
@@ -46,8 +53,10 @@ class BlurParams:
     min_face_px: int = 0
 
     def __post_init__(self) -> None:
-        if self.padding < 1.0:
-            raise ValueError("padding must be at least 1.0")
+        if not 0.0 <= self.conf <= 1.0:
+            raise ValueError("conf must be between 0 and 1")
+        if not math.isfinite(self.padding) or self.padding < 1.0:
+            raise ValueError("padding must be a finite value of at least 1.0")
         if self.hold_frames < 0:
             raise ValueError("hold_frames must not be negative")
         if self.min_face_px < 0:
@@ -55,7 +64,23 @@ class BlurParams:
 
 
 @dataclass(frozen=True)
+class Limits:
+    frame_tolerance: float = 0.05
+    probe_timeout_seconds: float = 120.0
+    frame_timeout_seconds: float = 120.0
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.frame_tolerance) or self.frame_tolerance < 0:
+            raise ValueError("frame_tolerance must be a finite, non-negative value")
+        for timeout in (self.probe_timeout_seconds, self.frame_timeout_seconds):
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise ValueError("timeouts must be finite and positive")
+
+
+@dataclass(frozen=True)
 class VideoMeta:
+    """width and height are the displayed size, after rotation metadata is applied."""
+
     width: int
     height: int
     fps_num: int
@@ -69,6 +94,15 @@ class VideoMeta:
 class Codec:
     hw_decode: bool
     encoder: str
+
+
+@dataclass(frozen=True)
+class DetectionStats:
+    frames_total: int
+    frames_with_faces: int
+    frames_filled: int
+    longest_zero_run_frames: int
+    no_faces_detected: bool
 
 
 @dataclass(frozen=True)
@@ -86,6 +120,7 @@ class VideoResult:
     device: str
     encoder: str
     params: BlurParams
+    stats: DetectionStats
 
 
 def ffmpeg_bin() -> str:
@@ -104,26 +139,43 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def probe(path: str | Path) -> VideoMeta:
+def _rotation_degrees(stream: dict) -> int:
+    values = [entry["rotation"] for entry in stream.get("side_data_list", []) if "rotation" in entry]
+    if not values and "rotate" in stream.get("tags", {}):
+        values = [stream["tags"]["rotate"]]
+    return round(float(values[0])) if values else 0
+
+
+def probe(path: str | Path, timeout: float = Limits.probe_timeout_seconds) -> VideoMeta:
     cmd = [
         ffprobe_bin(), "-v", "error", "-select_streams", "v:0", "-count_packets",
-        "-show_entries", "stream=width,height,r_frame_rate,nb_read_packets,codec_name:format=duration",
+        "-show_entries",
+        "stream=width,height,r_frame_rate,nb_read_packets,codec_name,duration"
+        ":stream_side_data=rotation:stream_tags=rotate:format=duration",
         "-of", "json", str(path),
     ]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout).stdout
         info = json.loads(out)
         stream = info["streams"][0]
         rate = Fraction(stream["r_frame_rate"])
+        width, height = int(stream["width"]), int(stream["height"])
+        rotation = _rotation_degrees(stream)
+        if rotation % 90:
+            raise PipelineError("UNSUPPORTED_ROTATION", "only right-angle rotation is supported", False)
+        if rotation % 180:
+            width, height = height, width
         return VideoMeta(
-            width=int(stream["width"]),
-            height=int(stream["height"]),
+            width=width,
+            height=height,
             fps_num=rate.numerator,
             fps_den=rate.denominator,
             codec=stream["codec_name"],
             frames=int(stream["nb_read_packets"]),
-            duration_ms=round(float(info["format"]["duration"]) * 1000),
+            duration_ms=round(float(stream.get("duration") or info["format"]["duration"]) * 1000),
         )
+    except subprocess.TimeoutExpired as exc:
+        raise PipelineError("FFMPEG_TIMEOUT", "ffprobe stopped responding", False) from exc
     except OSError as exc:
         raise PipelineError("FFMPEG_UNAVAILABLE", "ffprobe could not be started", True) from exc
     except (subprocess.CalledProcessError, KeyError, IndexError, ValueError, ZeroDivisionError) as exc:
@@ -150,7 +202,7 @@ def select_codec(device: str) -> Codec:
 def decoder_cmd(src: str | Path, codec: Codec) -> list[str]:
     hw = ["-hwaccel", "cuda"] if codec.hw_decode else []
     return [
-        ffmpeg_bin(), "-hide_banner", "-loglevel", "error", *hw, "-noautorotate", "-i", str(src),
+        ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-xerror", *hw, "-i", str(src),
         "-map", "0:v:0", "-an", "-sn", "-dn", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
     ]
 
@@ -160,10 +212,12 @@ def encoder_cmd(dst: str | Path, meta: VideoMeta, codec: Codec) -> list[str]:
         encoder = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0"]
     else:
         encoder = ["-c:v", "libx264", "-preset", "medium", "-crf", "23"]
+    # yuv420p needs even dimensions. Padding the right/bottom keeps every box coordinate valid.
+    pad = ["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"] if meta.width % 2 or meta.height % 2 else []
     return [
         ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{meta.width}x{meta.height}",
-        "-r", f"{meta.fps_num}/{meta.fps_den}", "-i", "pipe:0", "-an",
+        "-r", f"{meta.fps_num}/{meta.fps_den}", "-i", "pipe:0", "-an", *pad,
         *encoder, "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(dst),
     ]
 
@@ -219,7 +273,7 @@ class BoxHolder:
     A moved face may briefly be blurred at both positions, which errs toward over-blurring.
     """
 
-    def __init__(self, hold_frames: int, match_iou: float = 0.3) -> None:
+    def __init__(self, hold_frames: int, match_iou: float = MATCH_IOU) -> None:
         self.hold_frames, self.match_iou = hold_frames, match_iou
         self._tracks: list[tuple[np.ndarray, int]] = []
 
@@ -235,6 +289,48 @@ class BoxHolder:
         return np.array([box for box, _ in survivors], np.float32).reshape(-1, 5)
 
 
+def fill_gaps(detected: list[np.ndarray], hold_frames: int) -> list[np.ndarray]:
+    """Extend each box hold_frames forward and backward, returning only the added boxes."""
+    forward_holder, backward_holder = BoxHolder(hold_frames), BoxHolder(hold_frames)
+    forward = [forward_holder.update(boxes) for boxes in detected]
+    backward = [backward_holder.update(boxes) for boxes in reversed(detected)]
+    backward.reverse()
+    filled = []
+    for ahead, behind in zip(forward, backward):
+        if len(ahead) and len(behind):
+            behind = behind[[not (box_iou(box, ahead) >= MATCH_IOU).any() for box in behind]]
+        filled.append(np.concatenate([ahead, behind]))
+    return filled
+
+
+def detection_stats(detected: list[np.ndarray], filled: list[np.ndarray]) -> DetectionStats:
+    with_faces = sum(1 for boxes in detected if len(boxes))
+    longest = current = 0
+    for boxes in detected:
+        current = 0 if len(boxes) else current + 1
+        longest = max(longest, current)
+    return DetectionStats(
+        frames_total=len(detected),
+        frames_with_faces=with_faces,
+        frames_filled=sum(1 for boxes in filled if len(boxes)),
+        longest_zero_run_frames=longest,
+        no_faces_detected=with_faces == 0,
+    )
+
+
+def check_frame_count(decoded: int, meta: VideoMeta, limits: Limits) -> None:
+    """Compare against duration x frame rate, which is what the decoder is expected to output.
+
+    The packet count cannot be the reference: a variable-frame-rate source legitimately
+    decodes to more frames than packets, and a truncated file has few packets too.
+    """
+    if decoded == 0:
+        raise PipelineError("DECODE_ERROR", "the video contains no decodable frames", False)
+    expected = round(meta.duration_ms * meta.fps_num / (1000 * meta.fps_den))
+    if abs(decoded - expected) > max(MIN_FRAME_ALLOWANCE, limits.frame_tolerance * expected):
+        raise PipelineError("DECODE_ERROR", "decoded frame count does not match the video duration", False)
+
+
 def read_exact(stream, buf: bytearray) -> int:
     view = memoryview(buf)
     got = 0
@@ -246,60 +342,136 @@ def read_exact(stream, buf: bytearray) -> int:
     return got
 
 
+class _Watchdog:
+    """Kill the given processes when no progress is reported for the timeout."""
+
+    def __init__(self, timeout: float, processes: list[subprocess.Popen]) -> None:
+        self._timeout, self._processes = timeout, processes
+        self._last = time.monotonic()
+        self._fired = False
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def beat(self) -> None:
+        self._last = time.monotonic()
+
+    def _run(self) -> None:
+        while not self._stop.wait(min(self._timeout / 4, 1.0)):
+            if time.monotonic() - self._last > self._timeout:
+                self._fired = True
+                for process in self._processes:
+                    if process.poll() is None:
+                        process.kill()
+                return
+
+    def __enter__(self) -> "_Watchdog":
+        self._last = time.monotonic()
+        self._thread.start()
+        return self
+
+    def __exit__(self, _type: object, exc: BaseException | None, _tb: object) -> None:
+        self._stop.set()
+        self._thread.join()
+        # A killed process surfaces as EOF, a broken pipe or a bad exit code. Report the cause.
+        if self._fired and (exc is None or isinstance(exc, (PipelineError, OSError))):
+            raise PipelineError("FFMPEG_TIMEOUT", "ffmpeg stopped responding", True) from exc
+
+
+def _frames(decoder: subprocess.Popen, meta: VideoMeta) -> Iterator[np.ndarray]:
+    buf = bytearray(meta.width * meta.height * 3)
+    while True:
+        got = read_exact(decoder.stdout, buf)
+        if got == 0:
+            return
+        if got < len(buf):
+            raise PipelineError("DECODE_ERROR", "decoder returned a truncated frame", False)
+        yield np.frombuffer(buf, np.uint8).reshape(meta.height, meta.width, 3).copy()
+
+
+def _shut_down(decoder: subprocess.Popen, encoder: subprocess.Popen | None = None) -> None:
+    for process in (decoder, encoder):
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+    decoder.stdout.close()
+    if encoder is not None:
+        try:
+            encoder.stdin.close()
+        except OSError:
+            pass
+
+
+def _detect_all(
+    src: str | Path,
+    meta: VideoMeta,
+    codec: Codec,
+    detector: FaceDetector,
+    params: BlurParams,
+    limits: Limits,
+) -> list[np.ndarray]:
+    decoder = subprocess.Popen(decoder_cmd(src, codec), stdout=subprocess.PIPE, bufsize=0)
+    detected: list[np.ndarray] = []
+    with _Watchdog(limits.frame_timeout_seconds, [decoder]) as watchdog:
+        try:
+            for frame in _frames(decoder, meta):
+                detected.append(filter_small(detector.detect(frame), params.min_face_px))
+                watchdog.beat()
+            decoder_rc = decoder.wait()
+        finally:
+            _shut_down(decoder)
+        if decoder_rc:
+            raise PipelineError("DECODE_ERROR", f"decoder exited with code {decoder_rc}", False)
+    return detected
+
+
 def _rounded(boxes: np.ndarray) -> list[list[float]]:
     return [[round(float(v), 2) for v in box] for box in boxes]
 
 
-def _encode_frames(
+def _blur_and_encode(
     src: str | Path,
     dst: Path,
     boxes_path: Path,
     meta: VideoMeta,
     codec: Codec,
-    detector: FaceDetector,
+    detected: list[np.ndarray],
+    filled: list[np.ndarray],
     params: BlurParams,
-) -> int:
-    buf = bytearray(meta.width * meta.height * 3)
-    holder = BoxHolder(params.hold_frames)
-    frames = 0
+    limits: Limits,
+) -> None:
     decoder = subprocess.Popen(decoder_cmd(src, codec), stdout=subprocess.PIPE, bufsize=0)
     encoder = subprocess.Popen(encoder_cmd(dst, meta, codec), stdin=subprocess.PIPE)
-    try:
-        with open(boxes_path, "w") as log:
-            while True:
-                got = read_exact(decoder.stdout, buf)
-                if got == 0:
-                    break
-                if got < len(buf):
-                    raise PipelineError("DECODE_ERROR", "decoder returned a truncated frame", False)
-                frame = np.frombuffer(buf, np.uint8).reshape(meta.height, meta.width, 3).copy()
-                detected = filter_small(detector.detect(frame), params.min_face_px)
-                held = holder.update(detected)
-                blur_boxes(frame, np.concatenate([detected, held]), params.padding)
-                try:
-                    encoder.stdin.write(frame.data)
-                except BrokenPipeError as exc:
-                    raise PipelineError("ENCODE_ERROR", "encoder stopped accepting frames", True) from exc
-                log.write(json.dumps({"frame": frames, "boxes": _rounded(detected), "held": _rounded(held)}) + "\n")
-                frames += 1
+    mismatch = PipelineError("DECODE_ERROR", "decode passes returned different frame counts", False)
+    frames = 0
+    with _Watchdog(limits.frame_timeout_seconds, [decoder, encoder]) as watchdog:
         try:
+            with open(boxes_path, "w") as log:
+                for frame in _frames(decoder, meta):
+                    # A frame without detection results must never be encoded.
+                    if frames >= len(detected):
+                        raise mismatch
+                    blur_boxes(frame, np.concatenate([detected[frames], filled[frames]]), params.padding)
+                    encoder.stdin.write(frame.data)
+                    log.write(
+                        json.dumps(
+                            {"frame": frames, "boxes": _rounded(detected[frames]), "filled": _rounded(filled[frames])}
+                        )
+                        + "\n"
+                    )
+                    frames += 1
+                    watchdog.beat()
             encoder.stdin.close()
+            encoder_rc, decoder_rc = encoder.wait(), decoder.wait()
         except BrokenPipeError as exc:
             raise PipelineError("ENCODE_ERROR", "encoder stopped accepting frames", True) from exc
-        encoder_rc, decoder_rc = encoder.wait(), decoder.wait()
-    finally:
-        for process in (decoder, encoder):
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-        decoder.stdout.close()
-    if decoder_rc:
-        raise PipelineError("DECODE_ERROR", f"decoder exited with code {decoder_rc}", False)
-    if encoder_rc:
-        raise PipelineError("ENCODE_ERROR", f"encoder exited with code {encoder_rc}", True)
-    if frames == 0:
-        raise PipelineError("DECODE_ERROR", "the video contains no decodable frames", False)
-    return frames
+        finally:
+            _shut_down(decoder, encoder)
+        if decoder_rc:
+            raise PipelineError("DECODE_ERROR", f"decoder exited with code {decoder_rc}", False)
+        if encoder_rc:
+            raise PipelineError("ENCODE_ERROR", f"encoder exited with code {encoder_rc}", True)
+    if frames != len(detected):
+        raise mismatch
 
 
 def process_video(
@@ -308,17 +480,21 @@ def process_video(
     detector: FaceDetector,
     params: BlurParams,
     boxes_path: str | Path,
+    limits: Limits = Limits(),
 ) -> VideoResult:
     """Write the blurred video and box log. dst only appears after a complete, checked encode."""
     started = time.perf_counter()
     dst, boxes_path = Path(dst), Path(boxes_path)
     partial = dst.with_name(dst.stem + ".part.mp4")
-    meta = probe(src)
+    meta = probe(src, limits.probe_timeout_seconds)
     codec = select_codec(detector.device)
+    detected = _detect_all(src, meta, codec, detector, params, limits)
+    check_frame_count(len(detected), meta, limits)
+    filled = fill_gaps(detected, params.hold_frames)
     try:
-        frames = _encode_frames(src, partial, boxes_path, meta, codec, detector, params)
-        encoded = probe(partial)
-        if encoded.frames != frames:
+        _blur_and_encode(src, partial, boxes_path, meta, codec, detected, filled, params, limits)
+        encoded = probe(partial, limits.probe_timeout_seconds)
+        if encoded.frames != len(detected):
             raise PipelineError("ENCODE_ERROR", "encoded frame count does not match the input", True)
         os.replace(partial, dst)
     except BaseException:
@@ -334,11 +510,12 @@ def process_video(
         fps_num=encoded.fps_num,
         fps_den=encoded.fps_den,
         duration_ms=encoded.duration_ms,
-        frame_count=frames,
+        frame_count=len(detected),
         processing_seconds=round(time.perf_counter() - started, 3),
         device=detector.device,
         encoder=codec.encoder,
         params=params,
+        stats=detection_stats(detected, filled),
     )
 
 
