@@ -1,0 +1,3 @@
+bucket = "<STATE_BUCKET_NAME_FROM_BOOTSTRAP_OUTPUT>"
+key    = "frith/poc/terraform.tfstate"
+region = "ap-northeast-2"

@@ -1,0 +1,29 @@
+# Copy to terraform.tfvars (gitignored) and fill every <PLACEHOLDER>.
+region      = "ap-northeast-2"
+environment = "poc"
+owner       = "<OWNER_NAME_OR_TEAM>"
+
+cognito_domain_prefix = "<UNIQUE_COGNITO_DOMAIN_PREFIX>"
+
+alert_emails       = ["<ALERT_EMAIL>"]
+budget_emails      = ["<BUDGET_EMAIL>"]
+monthly_budget_usd = "<MONTHLY_BUDGET_USD_NUMBER>"
+
+github_repo       = "<GITHUB_OWNER>/<REPO_NAME>"
+state_bucket_name = "<STATE_BUCKET_NAME_FROM_BOOTSTRAP_OUTPUT>"
+state_key         = "frith/poc/terraform.tfstate"
+
+# Do NOT put the ExternalId here; export it instead:
+#   export TF_VAR_external_gpu_external_id="$(openssl rand -hex 24)"   # keep it; Aircloud needs the same value
+
+# Optional
+# acm_certificate_arn          = "<ACM_CERT_ARN_IN_REGION>"
+# extra_cors_origins           = ["http://localhost:5173"]
+# extra_callback_urls          = ["http://localhost:5173/auth/callback"]
+# extra_logout_urls            = ["http://localhost:5173/"]
+# nat_mode                     = "instance" # or "gateway"
+# interface_endpoints          = ["ecr.api", "ecr.dkr", "logs", "sqs", "secretsmanager", "sts"]
+# external_gpu_allowed_source_cidrs = ["<AIRCLOUD_EGRESS_CIDR>"]
+# external_gpu_safe_put_prefix      = "derivatives/"
+# create_github_oidc_provider  = false
+# existing_github_oidc_provider_arn = "<EXISTING_OIDC_PROVIDER_ARN>"
