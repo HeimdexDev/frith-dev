@@ -263,13 +263,23 @@ impl FrithApi for MockApi {
             ));
         }
         let event = match input.action.as_str() {
-            "finish" if d.status == Status::Processing => {
+            "finish" | "gpu_finish" if d.status == Status::Processing => {
                 d.status = Status::Review;
-                "Mock processing completed".to_string()
+                if input.action == "gpu_finish" {
+                    "GPU output received · Review required"
+                } else {
+                    "Mock processing completed"
+                }
+                .to_string()
             }
-            "fail" if d.status == Status::Processing => {
+            "fail" | "gpu_fail" if d.status == Status::Processing => {
                 d.status = Status::Failed;
-                "Mock processing failed".to_string()
+                if input.action == "gpu_fail" {
+                    "GPU processing failed or timed out"
+                } else {
+                    "Mock processing failed"
+                }
+                .to_string()
             }
             "retry" if d.status == Status::Failed => {
                 d.status = Status::Processing;

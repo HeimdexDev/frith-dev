@@ -1,9 +1,10 @@
 pub mod api;
+pub mod processing;
 mod request_ui;
 mod ui;
 use api::*;
 use axum::{
-    Form, Router,
+    Extension, Form, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
@@ -96,7 +97,11 @@ pub fn app() -> Router {
     app_with(Box::new(MockApi::default()))
 }
 pub fn app_with(api: Box<dyn FrithApi>) -> Router {
+    app_with_gpu(api, None)
+}
+pub fn app_with_gpu(api: Box<dyn FrithApi>, config: Option<processing::GpuConfig>) -> Router {
     Router::new()
+        .route("/healthz", get(|| async { "ok" }))
         .route("/", get(index))
         .route("/requests", get(request_list).post(create_request))
         .route("/requests/new", get(new_request))
@@ -141,6 +146,7 @@ pub fn app_with(api: Box<dyn FrithApi>) -> Router {
             }),
         )
         .fallback(|| async { ApiError(404, "Page not found.") })
+        .layer(Extension(processing::Processing::new(config)))
         .with_state(Arc::new(Mutex::new(api)))
 }
 async fn index(
@@ -159,6 +165,7 @@ async fn new_dataset(Query(q): Query<PageQuery>) -> Result<Html<String>, ApiErro
     Ok(Html(ui::new_dataset(q.org()?)))
 }
 async fn detail(
+    Extension(gpu): Extension<processing::Processing>,
     State(api): State<Service>,
     Path(id): Path<u64>,
     Query(q): Query<PageQuery>,
@@ -169,7 +176,14 @@ async fn detail(
     if clip >= d.clips.len() {
         return Err(ApiError(404, "Video not found."));
     }
-    Ok(Html(ui::detail(org, d, clip)))
+    Ok(Html(ui::detail(
+        org,
+        d,
+        clip,
+        gpu.config.is_some(),
+        gpu.running(id),
+        gpu.has_job(id),
+    )))
 }
 async fn create(
     State(api): State<Service>,
@@ -181,6 +195,7 @@ async fn create(
     Ok(Redirect::to(&format!("/datasets/{id}?org={org}")))
 }
 async fn change(
+    Extension(gpu): Extension<processing::Processing>,
     State(api): State<Service>,
     Path(id): Path<u64>,
     Query(q): Query<PageQuery>,
@@ -188,18 +203,31 @@ async fn change(
 ) -> Result<Redirect, ApiError> {
     let org = q.org()?;
     let clip = input.clip.unwrap_or(0);
-    api.lock().unwrap().change(org, id, input)?;
+    if input.action == "process" {
+        gpu.start(api.clone(), org, id, input.revision)?;
+    } else {
+        if input.action.starts_with("gpu_")
+            || (gpu.config.is_some() && ["finish", "fail"].contains(&input.action.as_str()))
+        {
+            return Err(ApiError(403, "Only the GPU job can complete processing."));
+        }
+        api.lock().unwrap().change(org, id, input)?;
+    }
     Ok(Redirect::to(&format!(
         "/datasets/{id}?org={org}&clip={clip}"
     )))
 }
 async fn media(
+    Extension(gpu): Extension<processing::Processing>,
     State(api): State<Service>,
     Path((id, clip)): Path<(u64, usize)>,
     Query(q): Query<PageQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     api.lock().unwrap().media(q.org()?, id, clip, false)?;
+    if let Some(bytes) = gpu.video(id, false)? {
+        return Ok(video_response(&bytes, &headers));
+    }
     Ok(video_response(
         include_bytes!("../static/sample.mp4"),
         &headers,
@@ -207,32 +235,45 @@ async fn media(
 }
 
 async fn download(
+    Extension(gpu): Extension<processing::Processing>,
     State(api): State<Service>,
     Path((id, clip)): Path<(u64, usize)>,
     Query(q): Query<PageQuery>,
 ) -> Result<Response, ApiError> {
     api.lock().unwrap().media(q.org()?, id, clip, true)?;
+    let bytes = gpu
+        .video(id, false)?
+        .map(|b| (*b).clone())
+        .unwrap_or_else(|| include_bytes!("../static/sample.mp4").to_vec());
     Ok((
         [
             (header::CONTENT_TYPE, "video/mp4"),
             (header::CACHE_CONTROL, "no-store"),
             (
                 header::CONTENT_DISPOSITION,
-                "attachment; filename=frith-synthetic-preview.mp4",
+                if gpu.has_job(id) {
+                    "attachment; filename=frith-gpu-demo.mp4"
+                } else {
+                    "attachment; filename=frith-synthetic-preview.mp4"
+                },
             ),
         ],
-        include_bytes!("../static/sample.mp4").as_slice(),
+        bytes,
     )
         .into_response())
 }
 
 async fn original(
+    Extension(gpu): Extension<processing::Processing>,
     State(api): State<Service>,
     Path((id, clip)): Path<(u64, usize)>,
     Query(q): Query<PageQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     api.lock().unwrap().original(q.org()?, id, clip)?;
+    if let Some(bytes) = gpu.video(id, true)? {
+        return Ok(video_response(&bytes, &headers));
+    }
     Ok(video_response(
         include_bytes!("../static/original.mp4"),
         &headers,
@@ -241,7 +282,7 @@ async fn original(
 
 // The small fixture is embedded. Production should delegate authorized range delivery
 // to the media service and never make an original publicly cacheable.
-fn video_response(bytes: &'static [u8], headers: &HeaderMap) -> Response {
+fn video_response(bytes: &[u8], headers: &HeaderMap) -> Response {
     let len = bytes.len();
     let range = headers
         .get(header::RANGE)
@@ -261,9 +302,10 @@ fn video_response(bytes: &'static [u8], headers: &HeaderMap) -> Response {
         (start <= end && start < len).then_some((start, end))
     });
     let mut response = match bounds {
-        None => bytes.into_response(),
+        None => bytes.to_vec().into_response(),
         Some(Some((start, end))) => {
-            let mut response = (StatusCode::PARTIAL_CONTENT, &bytes[start..=end]).into_response();
+            let mut response =
+                (StatusCode::PARTIAL_CONTENT, bytes[start..=end].to_vec()).into_response();
             response.headers_mut().insert(
                 header::CONTENT_RANGE,
                 format!("bytes {start}-{end}/{len}").parse().unwrap(),

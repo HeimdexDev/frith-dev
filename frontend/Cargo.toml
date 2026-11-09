@@ -8,7 +8,7 @@ publish = false
 axum = "0.8"
 leptos = { version = "0.8", features = ["ssr"] }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "process", "time", "io-util"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

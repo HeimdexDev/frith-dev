@@ -31,6 +31,12 @@ async fn request(
     )
 }
 #[tokio::test]
+async fn health_check_does_not_require_a_demo_organization() {
+    let (status, _, body) = request(frith_web::app(), "GET", "/healthz", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "ok");
+}
+#[tokio::test]
 async fn renders_navigation_search_and_receiver_controls() {
     let app = frith_web::app();
     let (status, _, html) = request(app.clone(), "GET", "/", "").await;
@@ -529,4 +535,90 @@ async fn task_view_never_changes_authority_and_details_use_actual_role() {
     assert!(!receiver.contains("Preparation workflow"));
     assert!(!receiver.contains("Compare original"));
     assert!(!receiver.contains("Share dataset"));
+}
+
+#[tokio::test]
+async fn gpu_process_http_uses_returned_video_and_blocks_manual_completion() {
+    use frith_web::{api::MockApi, processing::GpuConfig};
+    use std::{path::PathBuf, sync::Arc, time::Duration};
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let app = frith_web::app_with_gpu(
+        Box::new(MockApi::default()),
+        Some(GpuConfig {
+            python: "/bin/cat".into(),
+            helper: root.join("static/sample.mp4"),
+            sample: Arc::new(include_bytes!("../static/original.mp4").to_vec()),
+        }),
+    );
+    let (_, headers, _) = request(
+        app.clone(),
+        "POST",
+        "/datasets?org=heimdex",
+        "name=GPU+sample&files=sample.mp4",
+    )
+    .await;
+    let page = headers
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let id = page.split('/').nth(2).unwrap().split('?').next().unwrap();
+    let change = format!("/datasets/{id}/change?org=heimdex");
+    let (_, _, html) = request(app.clone(), "GET", &page, "").await;
+    assert!(html.contains("Process on GPU"));
+    assert!(!html.contains("Mock processing controls"));
+    for action in ["finish", "fail", "gpu_finish", "gpu_fail"] {
+        assert_eq!(
+            request(
+                app.clone(),
+                "POST",
+                &change,
+                &format!("revision=1&action={action}")
+            )
+            .await
+            .0,
+            403
+        );
+    }
+    assert_eq!(
+        request(app.clone(), "POST", &change, "revision=1&action=process")
+            .await
+            .0,
+        303
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (_, _, html) = request(app.clone(), "GET", &page, "").await;
+            if html.contains("GPU output received") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let (status, _, html) = request(app.clone(), "GET", &page, "").await;
+    assert_eq!(status, 200);
+    assert!(html.contains("Compare original"));
+    assert_eq!(
+        request(
+            app.clone(),
+            "GET",
+            &format!("/datasets/{id}/media/0?org=atlas"),
+            ""
+        )
+        .await
+        .0,
+        404
+    );
+    let (status, _, bytes) = request(
+        app.clone(),
+        "GET",
+        &format!("/datasets/{id}/media/0?org=heimdex"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(bytes.contains("ftyp"));
 }
